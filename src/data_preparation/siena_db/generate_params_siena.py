@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+from src.utils.config import DB_SIENA_PATH
+
 
 # =============================================================================
 # PARSING DE TIEMPOS
@@ -252,11 +254,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Genera parámetros de batch a partir de archivos Seizures-list-PNXX.txt"
     )
-    parser.add_argument("base_dir", type=str, default= "/home/flach7/physionet.org/files/siena-scalp-eeg/1.0.0",
+    parser.add_argument("base_dir", type=str, default= DB_SIENA_PATH,
                         help="Carpeta base que contiene las subcarpetas PNXX")
-    parser.add_argument("--out", type=str, default="./afull_pipeline/preparing_siena_database/batch_params.txt",
+    parser.add_argument("--out", type=str, default=Path(__file__).resolve().parent / "batch_params.txt",
                         help="Archivo de salida con las listas (default: batch_params.txt)")
-    parser.add_argument("--csv", type=str, default="./afull_pipeline/preparing_siena_database/batch_params.csv",
+    parser.add_argument("--csv", type=str, default=Path(__file__).resolve().parent / "batch_params.csv",
                         help="Archivo CSV adicional (default: batch_params.csv)")
     args = parser.parse_args()
 
