@@ -150,7 +150,7 @@ def main() -> int:
     if args.subject is None:
         args.subject = "EPCTL01"
     if args.file is None:
-        args.file = f"/home/flach7/Documentos/Mulet/programas/afull_pipeline/OSF_database/ANPHY-Sleep/osfstorage/{args.subject}/{args.subject}.edf"
+        args.file = f"{DB_ANPHY_PATH}/{args.subject}/{args.subject}.edf"
     if args.t_start is None:
         args.t_start = 13710.0
     if args.t_end is None:

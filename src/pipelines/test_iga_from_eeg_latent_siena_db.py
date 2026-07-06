@@ -70,7 +70,8 @@ from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
 from src.utils.config import (
     CONFIGS,
     BASE_RESULTS_PATH, 
-    BASE_CACHE_PATH
+    BASE_CACHE_PATH,
+    DB_SIENA_PATH,
     )
 
 
@@ -131,7 +132,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ica-method", type=str, default="picard")
     parser.add_argument("--verbose", action="store_true", default = True)
     # ---- Output ----
-    parser.add_argument("--out-dir", type=str, default=".",
+    parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory to save plots (default: current)")
     parser.add_argument("--period-label", type=str, default="unknown",
                         help="Label for the period (pre-ictal, inter-ictal, "
@@ -143,19 +144,26 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
-
+print(DB_SIENA_PATH)
 def main() -> int:
     args = _parse_args()
-    # args.patient = "PN01"
-    # args.record = "1"
-    # args.file = Path(f"/home/flach7/Documentos/Mulet/EEG_recordings/SienaDB/{args.patient}/{args.patient}-{args.record}.edf")
-    args.file = Path(f"/home/flach7/physionet.org/files/siena-scalp-eeg/1.0.0/{args.patient}/{args.patient}-{args.record}.edf")
+    if args.file is None:
+        args.file = Path(f"{DB_SIENA_PATH}/{args.patient}/{args.patient}-{args.record}.edf")
+    
     if args.out_dir is None:
         args.out_dir = BASE_RESULTS_PATH
-    # args.t_start = 0.0
-    # args.t_end = 60.0
-    args.latent_dim = 2
+        
+    if args.t_start is None:
+        args.t_start = 0.0
+        
+    if args.t_end is None:
+        args.t_end = 60.0
+        
     verbose = "INFO" if args.verbose else None
+    
+    if args.out_dir is None:
+        args.out_dir = BASE_RESULTS_PATH
+        
     out_dir = Path(args.out_dir + f"/siena/{args.patient}-{args.record}/{args.latent_dim}_latent_dim/from{args.t_start}_to_{args.t_end}_{args.period_label}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,7 +176,7 @@ def main() -> int:
     print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM EEG")
     print("=" * 70)
     
-    cache_path = Path(f"./cache_eeg_siena/{args.patient}-{args.record}/from{args.t_start}_to_{args.t_end}_latent_dim_{args.latent_dim}.npz")
+    cache_path = Path(BASE_CACHE_PATH+f"/cache_eeg_siena/{args.patient}-{args.record}/from{args.t_start}_to_{args.t_end}_latent_dim_{args.latent_dim}.npz")
     # cache_path = Path(args.cache_file)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     # -----------------------------------------------------------------
