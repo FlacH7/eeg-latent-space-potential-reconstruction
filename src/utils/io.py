@@ -27,12 +27,12 @@ def _get_bspline_space_class():
     if _BSplineTensorSpace is not None:
         return _BSplineTensorSpace
     try:
-        from iga_reconstructor import BSplineTensorSpace
+        from src.potential_reconstruction.iga_reconstructor import BSplineTensorSpace
         _BSplineTensorSpace = BSplineTensorSpace
         return BSplineTensorSpace
     except ImportError:
         try:
-            from potential_reconstruction.iga_reconstructor import BSplineTensorSpace
+            from src.potential_reconstruction.iga_reconstructor import BSplineTensorSpace
             _BSplineTensorSpace = BSplineTensorSpace
             return BSplineTensorSpace
         except ImportError:
@@ -41,7 +41,7 @@ def _get_bspline_space_class():
             if str(_HERE) not in sys.path:
                 sys.path.insert(0, str(_HERE))
             try:
-                from iga_reconstructor import BSplineTensorSpace
+                from src.potential_reconstruction.iga_reconstructor import BSplineTensorSpace
                 _BSplineTensorSpace = BSplineTensorSpace
                 return BSplineTensorSpace
             except ImportError:

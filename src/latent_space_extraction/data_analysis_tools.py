@@ -112,7 +112,7 @@ def _synthetic_km_resample(
     # 1. Estimar KM
     # -----------------------------------------------------------------
     try:
-        from km_tools_v2 import extract_km_coefficients
+        from src.potential_reconstruction.km_tools_v2 import extract_km_coefficients
         bins = [max(20, int(n_samples ** (1.0 / n_dim) / 2))] * n_dim
         drift, diffusion, edges = extract_km_coefficients(
             data, bins=bins, p=2, bw=None, kernel="epanechnikov", dt=dt

@@ -29,7 +29,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from potential_io_helper import load_potential, find_potential_files
+from src.utils.io import load_potential, find_potential_files
 
 
 # =============================================================================

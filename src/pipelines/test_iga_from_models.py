@@ -17,7 +17,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from km_tools_v2 import (
+from src.potential_reconstruction.km_tools_v2 import (
     simulate_data,
     extract_km_coefficients,
     plot_km_components,
@@ -27,9 +27,9 @@ from km_tools_v2 import (
     plot_potential_2d,
     # optimal_bw
 )
-from bw_optimization import optimal_bw
+from src.potential_reconstruction.bw_optimization import optimal_bw
 from pathlib import Path
-from data_analysis_tools import outliers_cleaning, augment_samples
+from src.latent_space_extraction.data_analysis_tools import outliers_cleaning, augment_samples
 
 # ================================================================
 # CONFIGURACIÓN GLOBAL
@@ -370,7 +370,7 @@ if D == 2:
 
 elif D >= 3:
     # Para D>=3, plotear cortes 2D seleccionando pares de dimensiones
-    from km_tools_v2 import plot_potential_slice
+    from src.potential_reconstruction.km_tools_v2 import plot_potential_slice
     U_theo_grid = theoretical['potential_grid'](edges)
 
     # Plot todos los pares de las primeras 3 dimensiones

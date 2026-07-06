@@ -18,8 +18,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from afull_pipeline.potential_io_helper import load_potential, find_potential_files
-from afull_pipeline.postprocess_potentials import (
+from src.utils.io import load_potential, find_potential_files
+from postprocess_potentials import (
     detect_basins_gradient_following,
     compute_basin_asymmetry,
 )

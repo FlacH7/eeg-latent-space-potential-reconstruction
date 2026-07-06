@@ -36,7 +36,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import ndimage
 
-from afull_pipeline.potential_io_helper import (
+from src.utils.io import (
     load_potential,
     find_potential_files,
     group_potentials_by_subject_and_stage,

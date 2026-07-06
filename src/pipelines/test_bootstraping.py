@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 # km_tools_v2 y utilidades
 # ---------------------------------------------------------------------------
-from km_tools_v2 import (
+from src.potential_reconstruction.km_tools_v2 import (
     simulate_data,
     extract_km_coefficients,
     plot_km_components,
@@ -46,18 +46,18 @@ from km_tools_v2 import (
     plot_potential_2d,
     plot_potential_slice,
 )
-from bw_optimization import optimal_bw
-from data_analysis_tools import outliers_cleaning, augment_dimensions
+from src.potential_reconstruction.bw_optimization import optimal_bw
+from src.latent_space_extraction.data_analysis_tools import outliers_cleaning, augment_dimensions
 
 # ---------------------------------------------------------------------------
 # Funciones existentes del proyecto EEG
 # ---------------------------------------------------------------------------
-from eeg_preprocessing import (
+from src.latent_space_extraction.eeg_preprocessing import (
     fit_ica,
     extract_clean_components,
     apply_bandpass_filter,
 )
-from markov_subspace import find_best_subspace_markov, greedy_forward_selection_markov
+from src.latent_space_extraction.markov_subspace import find_best_subspace_markov, greedy_forward_selection_markov
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN GLOBAL
