@@ -64,7 +64,8 @@ from src.utils.io import save_potential
 from src.utils.config import (
     CONFIGS,
     BASE_RESULTS_PATH, 
-    BASE_CACHE_PATH
+    BASE_CACHE_PATH,
+    DB_ANPHY_PATH
     )
 # ------------------------------------------------
 
@@ -78,15 +79,15 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # ---- EEG source ----
-    parser.add_argument("--file", type=str, required=True,
+    parser.add_argument("--file", type=str, default=None,
                         help="Path to raw EEG file (.edf)")
-    parser.add_argument("--subject", type=str, required=True,
+    parser.add_argument("--subject", type=str, default = None,
                         help="Subject ID (e.g. EPCTL01)")
     parser.add_argument("--epoch-idx", type=str, default="0",
                         help="Epoch index (for cache naming)")
-    parser.add_argument("--t-start", type=float, required=True,
+    parser.add_argument("--t-start", type=float, default = None,
                         help="Start time (s) for EEG segment to analyze.")
-    parser.add_argument("--t-end", type=float, required=True,
+    parser.add_argument("--t-end", type=float, default = None,
                         help="End time (s) for EEG segment to analyze.")
     # ---- Cache / persistence ----
     parser.add_argument("--cache-file", type=str, default=None,
@@ -120,7 +121,7 @@ def _parse_args() -> argparse.Namespace:
     # ---- Output ----
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory to save plots (default: current)")
-    parser.add_argument("--stage-label", type=str, default="unknown",
+    parser.add_argument("--stage-label", type=str, default=None,
                         help="Sleep stage label (W, N1, N2, N3, R, L). Used in output path.")
     # ---- NUEVO: Opcion para guardar/cargar datos del potencial ----
     parser.add_argument("--save-potential", action="store_true", default=True,
@@ -146,11 +147,16 @@ def main() -> int:
     #-------------------------------------------------------
     # Manual parameters
     # ------------------------------------------------------
-    # args.subject = "EPCTL01"
-    # args.file = f"/home/flach7/Documentos/Mulet/programas/afull_pipeline/OSF_database/ANPHY-Sleep/osfstorage/{args.subject}/{args.subject}.edf"
-    # args.t_start = 13710.0
-    # args.t_end =  14460.0
-    # args.stage_label = "N2"
+    if args.subject is None:
+        args.subject = "EPCTL01"
+    if args.file is None:
+        args.file = f"/home/flach7/Documentos/Mulet/programas/afull_pipeline/OSF_database/ANPHY-Sleep/osfstorage/{args.subject}/{args.subject}.edf"
+    if args.t_start is None:
+        args.t_start = 13710.0
+    if args.t_end is None:
+        args.t_end =  14460.0
+    if args.stage_label is None:
+        args.stage_label = "N2"
     
     # -----------------------------------------------------------------
     # Output directory: iga_from_eeg_latent/anphy/<subject>/...

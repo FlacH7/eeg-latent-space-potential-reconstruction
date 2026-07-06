@@ -52,28 +52,28 @@ import mne
 import numpy as np
 
 #Preprocessing
-from eeg_preprocessing import (
+from src.latent_space_extraction.eeg_preprocessing import (
     load_raw_eeg,
     load_sample_mne_data,
     run_full_preprocessing,
 )
 
 # Conservative fraction (Stage II)
-from conservative_fraction import (
+from src.latent_space_extraction.conservative_fraction import (
     find_best_subspace_fc,
     greedy_forward_selection_fc,
     score_many_combinations_fc,
 )
 
 # Markov time (Stage III)
-from markov_subspace import (
+from src.latent_space_extraction.markov_subspace import (
     find_best_subspace_markov,
     greedy_forward_selection_markov,
     score_many_combinations_markov,
 )
 
 # Unified scoring strategies
-from scoring import (
+from src.latent_space_extraction.scoring import (
     independent_selection,
     pareto_frontier_selection,
     sequential_filtering_selection,

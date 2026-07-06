@@ -29,13 +29,13 @@ from typing import Callable, Literal, Sequence
 
 import numpy as np
 
-from conservative_fraction import (
+from src.latent_space_extraction.conservative_fraction import (
     compute_conservative_fraction,
     find_best_subspace_fc,
     greedy_forward_selection_fc,
     score_many_combinations_fc,
 )
-from markov_subspace import (
+from src.latent_space_extraction.markov_subspace import (
     compute_markov_time,
     discretize_series,
     evaluate_markov_combination,

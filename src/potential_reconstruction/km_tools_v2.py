@@ -32,7 +32,7 @@ import scipy.ndimage as ndi
 # ---------------------------------------------------------------------------
 # Importar núcleo IgA
 # ---------------------------------------------------------------------------
-from iga_reconstructor import (
+from src.potential_reconstruction.iga_reconstructor import (
     reconstruct_potential_iga,
     compute_g_robust,
     compute_helmholtz_residual,
@@ -388,7 +388,7 @@ def simulate_data(config, cache_dir='sim_cache', use_cache=True):
         raise ValueError(f"Modelo '{model}' no reconocido.")
 
     if use_cache:
-        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         np.savez_compressed(cache_path, data=data, model_info=model_info)
         print(f"[CACHE] Guardada en: {cache_path}")
 

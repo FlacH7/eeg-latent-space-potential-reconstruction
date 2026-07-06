@@ -65,7 +65,7 @@ def main():
         description="Descarga el dataset Siena Scalp EEG de PhysioNet."
     )
     parser.add_argument(
-        "directorio",
+        "--directorio",
         help="Directorio de destino donde se descargarán los archivos.",
         default= DB_SIENA_PATH
     )

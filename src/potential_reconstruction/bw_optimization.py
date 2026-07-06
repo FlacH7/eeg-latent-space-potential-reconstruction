@@ -26,8 +26,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from km_tools_v2 import extract_km_coefficients
-from iga_reconstructor import reconstruct_potential_iga
+from src.potential_reconstruction.km_tools_v2 import extract_km_coefficients
+from src.potential_reconstruction.iga_reconstructor import reconstruct_potential_iga
 
 # =============================================================================
 # Métricas auxiliares
