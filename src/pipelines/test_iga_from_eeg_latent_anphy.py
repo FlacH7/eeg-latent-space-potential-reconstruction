@@ -204,7 +204,7 @@ def main() -> int:
     print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM EEG")
     print("=" * 70)
     if args.cache_file is None:
-        args.cache_file = Path(BASE_CACHE_PATH+"/cache_eeg_anphy")
+        args.cache_file = Path(BASE_CACHE_PATH+f"/cache_eeg_anphy/{args.subject}/latent_dim_{args.latent_dim}/epoch_{args.t_start}s_{args.t_end}s_{args.stage_label}.npz")
     cache_path = Path(args.cache_file)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
