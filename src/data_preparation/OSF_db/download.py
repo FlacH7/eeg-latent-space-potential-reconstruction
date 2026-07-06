@@ -8,9 +8,10 @@ No requiere registro ni token (proyecto público).
 import os
 import subprocess
 import sys
+from src.utils.config import DB_ANPHY_PATH
 
 
-def download_anphy_sleep(output_dir: str = "./afull_pipeline/OSF_database/ANPHY-Sleep"):
+def download_anphy_sleep(output_dir: str = DB_ANPHY_PATH):
     """
     Descarga la base de datos ANPHY-Sleep desde OSF usando osfclient.
     Proyecto ID: R26FH (https://doi.org/10.17605/OSF.IO/R26FH)

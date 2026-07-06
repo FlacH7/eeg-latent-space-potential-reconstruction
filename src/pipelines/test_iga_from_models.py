@@ -31,86 +31,35 @@ from src.potential_reconstruction.bw_optimization import optimal_bw
 from pathlib import Path
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning, augment_samples
 
-# ================================================================
-# CONFIGURACIÓN GLOBAL
-# ================================================================
-dt = 0.001
-T = 1800.0
-burn_ratio = 0.1
-seed = 123
+# ---------------------------------------------------------------------------
+# GLOBAL CONFIGURATION
+# ---------------------------------------------------------------------------
+from src.utils.config import (
+    CONFIGS,
+    DT,
+    SEED,
+    TIME,
+    BASE_RESULTS_PATH
+)
 
-# ================================================================
-# MODELOS
-# ================================================================
-configs = {
-    'ou': {
-        'model': 'ou', 'D': 2, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'theta': np.array([[1.0, 0.2], [0.2, 0.8]]), 'sigma': np.array([[0.5, 0.0], [0.0, 0.3]])},
-        'bins': np.array([100, 100]),
-        'drift_components': [0, 1], 'diff_components': [(0,0), (1,1), (0,1)],
-        'degree': 2,
-    },
-    'single_well': {
-        'model': 'single_well', 'D': 1, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'k': 1.0, 'sigma': 0.5},
-        'bins': np.array([200]),
-        'drift_components': [0], 'diff_components': [(0,0)],
-        'degree': 2,
-    },
-    'asymmetric_double_well': {
-        'model': 'asymmetric_double_well', 'D': 1, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'a': 1.0, 'b': 0.5, 'c': -1.0, 'd': 0.2, 'sigma': 0.5},
-        'bins': np.array([200]),
-        'drift_components': [0], 'diff_components': [(0,0)],
-        'degree': 2,
-    },
-    'double_well': {
-        'model': 'double_well', 'D': 2, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'a': 1.0, 'b': 1.0, 'c': 0.1, 'sigma': 0.5},
-        'bins': np.array([50,50]),
-        'drift_components': [0, 1], 'diff_components': [(0,0), (1,1), (0,1)],
-        'degree': 2,
-    },
-    'triple_well_3d': {
-        'model': 'triple_well_3d', 'D': 3, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'a': 1.0, 'b': 1.0, 'c': 0.3, 'k_rest': 1.0, 'sigma': 0.4},
-        'bins': np.array([40, 40, 40]),
-        'drift_components': [0, 1, 2], 'diff_components': [(0,0), (1,1), (2,2), (0,1), (0,2),(1,2)],
-        'degree': 2,
-    },
-    'ring_attractor': {
-        'model': 'ring_attractor', 'D': 2, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'alpha': 1.0, 'r0': 1.0, 'omega': 2.0, 'sigma': 0.3},
-        'bins': np.array([60, 60]),
-        'drift_components': [0, 1], 'diff_components': [(0,0), (1,1), (0,1)],
-        'degree': 2,
-    },
-    'multi_stable': {
-        'model': 'multi_stable', 'D': 2, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'a': 1.0, 'b': 1.0, 'c': 0.5, 'sigma': 0.5},
-        'bins': np.array([100, 100]),
-        'drift_components': [0, 1], 'diff_components': [(0,0), (1,1), (0,1)],
-        'degree': 2,
-    },
-    'stochastic_oscillator': {
-        'model': 'stochastic_oscillator', 'D': 2, 'dt': dt, 'T': T, 'burn_ratio': burn_ratio, 'seed': seed,
-        'params': {'lambda': 1.0, 'omega': 2.0, 'sigma': 0.3},
-        'bins': np.array([60, 60]),
-        'drift_components': [0, 1], 'diff_components': [(0,0), (1,1), (0,1)],
-        'degree': 2,
-    }
-}
+# ---------------------------------------------------------------------------
+# MODELS CONFIG
+# ---------------------------------------------------------------------------
+configs = CONFIGS
+dt = DT
+seed = SEED
+T = TIME
 
 # ================================================================
 # ELEGIR MODELO
 # ================================================================
 models = ['single_well', 'asymmetric_double_well', 'ou', 'double_well', 'multi_stable', 'triple_well_3d', 'ring_attractor', 'stochastic_oscillator']
-model_name = models[3]  # Cambiar índice para probar otros (default: double_well)
+model_name = models[3]  
 
 config = configs[model_name]
 D = config['D']
 
-out_dir = Path("." + f"/iga_from_eeg_latent/{model_name}_d{D}")
+out_dir = Path(BASE_RESULTS_PATH + f"/{model_name}_d{D}")
 out_dir.mkdir(parents=True, exist_ok=True)
 
 print("="*70)

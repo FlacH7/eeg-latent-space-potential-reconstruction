@@ -39,6 +39,10 @@ from iga_reconstructor import (
     BSplineTensorSpace
 )
 
+from src.utils.config import(
+    BASE_CACHE_PATH
+)
+
 # =============================================================================
 # SECCIÓN 0: UTILIDADES GENERALES
 # =============================================================================
@@ -63,7 +67,7 @@ def _build_cache_path(config, cache_dir='sim_cache'):
     param_str = json.dumps(param_dict, sort_keys=True, ensure_ascii=True)
     param_hash = hashlib.md5(param_str.encode('utf-8')).hexdigest()
     cache_filename = f"sim_D{config['D']}_{config['model']}_{param_hash}.npz"
-    return os.path.join(cache_dir, cache_filename), param_dict
+    return os.path.join(BASE_CACHE_PATH, cache_dir, cache_filename), param_dict
 
 def _rebuild_theoretical(model_info, D):
     """Reconstruye el dict 'theoretical' a partir de model_info (serializable)."""

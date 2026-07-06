@@ -67,6 +67,12 @@ from src.potential_reconstruction.bw_optimization import optimal_bw
 
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
 
+from src.utils.config import (
+    CONFIGS,
+    BASE_RESULTS_PATH, 
+    BASE_CACHE_PATH
+    )
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -144,12 +150,13 @@ def main() -> int:
     # args.record = "1"
     # args.file = Path(f"/home/flach7/Documentos/Mulet/EEG_recordings/SienaDB/{args.patient}/{args.patient}-{args.record}.edf")
     args.file = Path(f"/home/flach7/physionet.org/files/siena-scalp-eeg/1.0.0/{args.patient}/{args.patient}-{args.record}.edf")
-    args.out_dir = "."
+    if args.out_dir is None:
+        args.out_dir = BASE_RESULTS_PATH
     # args.t_start = 0.0
     # args.t_end = 60.0
     args.latent_dim = 2
     verbose = "INFO" if args.verbose else None
-    out_dir = Path(args.out_dir + f"/iga_from_eeg_latent/siena/{args.patient}-{args.record}/{args.latent_dim}_latent_dim/from{args.t_start}_to_{args.t_end}_{args.period_label}")
+    out_dir = Path(args.out_dir + f"/siena/{args.patient}-{args.record}/{args.latent_dim}_latent_dim/from{args.t_start}_to_{args.t_end}_{args.period_label}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     overall_t0 = time.time()
@@ -275,14 +282,15 @@ def main() -> int:
     # =====================================================================
     # 3. CONFIGURATION
     # =====================================================================
-    config = {
+    config = CONFIGS['base_2D_model'].copy()
+    config.update({
         "model_name": f"eeg_latent_d{latent_dim}_{args.scoring_method}",
         "D": D,
         "bins": [50] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
         "degree": 2,
-    }
+    })
 
     print(f"\n  KM config: {config}")
 

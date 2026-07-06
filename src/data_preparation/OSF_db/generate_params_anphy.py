@@ -24,6 +24,8 @@ import sys
 from pathlib import Path
 import numpy as np
 
+from src.utils.config import DB_ANPHY_PATH
+
 try:
     import h5py
 except ImportError:
@@ -136,7 +138,7 @@ def main() -> int:
     parser.add_argument(
         "base_dir",
         type=str,
-        default="./ANPHY-Sleep/osfstorage",
+        default=DB_ANPHY_PATH + "/osfstorage",
         help="Carpeta base que contiene EPCTLXX/, Artifact matrix/, etc.",
     )
     parser.add_argument(

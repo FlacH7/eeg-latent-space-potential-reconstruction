@@ -59,8 +59,13 @@ from src.latent_space_extraction.anphy_eeg import load_anphy_eeg
 
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
 
-# ---- NUEVO: Helper de I/O para potenciales ----
 from src.utils.io import save_potential
+
+from src.utils.config import (
+    CONFIGS,
+    BASE_RESULTS_PATH, 
+    BASE_CACHE_PATH
+    )
 # ------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -84,7 +89,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--t-end", type=float, required=True,
                         help="End time (s) for EEG segment to analyze.")
     # ---- Cache / persistence ----
-    parser.add_argument("--cache-file", type=str, default="eeg_latent_cache.npz",
+    parser.add_argument("--cache-file", type=str, default=None,
                         help="Path to cache file for the latent space.")
     parser.add_argument("--ignore-cache", action="store_true",
                         help="Ignore an existing cache file and force recomputation.")
@@ -113,7 +118,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ica-method", type=str, default="picard")
     parser.add_argument("--verbose", action="store_true", default=True)
     # ---- Output ----
-    parser.add_argument("--out-dir", type=str, default=".",
+    parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory to save plots (default: current)")
     parser.add_argument("--stage-label", type=str, default="unknown",
                         help="Sleep stage label (W, N1, N2, N3, R, L). Used in output path.")
@@ -132,7 +137,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    args.out_dir = "."
+    if  not args.out_dir:
+        args.out_dir = BASE_RESULTS_PATH
     verbose = "INFO" if args.verbose else None
 
     # Guardar potencial por defecto a menos que se pase --no-save-potential
@@ -151,7 +157,7 @@ def main() -> int:
     # -----------------------------------------------------------------
     out_dir = Path(
         args.out_dir
-        + f"/iga_from_eeg_latent/anphy/{args.subject}"
+        + f"/anphy/{args.subject}"
         + f"/{args.latent_dim}_latent_dim"
         + f"/epoch_{args.t_start}s_{args.t_end}s_{args.stage_label}"
     )
@@ -191,7 +197,8 @@ def main() -> int:
     print("\n" + "=" * 70)
     print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM EEG")
     print("=" * 70)
-
+    if args.cache_file is None:
+        args.cache_file = Path(BASE_CACHE_PATH+"/cache_eeg_anphy")
     cache_path = Path(args.cache_file)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -298,15 +305,15 @@ def main() -> int:
     # =====================================================================
     # 4. CONFIGURATION
     # =====================================================================
-    config = {
+    config = CONFIGS['base_2D_model'].copy()
+    config.update({
         "model_name": f"anphy_{args.subject}_d{latent_dim}_{args.scoring_method}",
         "D": D,
         "bins": [30] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
         "degree": 2,
-    }
-
+    })
     print(f"\n  KM config: {config}")
 
     # =====================================================================
