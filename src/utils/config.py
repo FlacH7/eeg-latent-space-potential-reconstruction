@@ -12,8 +12,12 @@ DB_TEST_RETEST_PATH = os.getenv("DB_TEST_RETEST_PATH")
 DB_ANPHY_PATH = os.getenv("DB_ANPHY_PATH")
 DB_SIENA_PATH = os.getenv("DB_SIENA_PATH")
 DATA_SIMULATIONS_CACHE_PATH = os.getenv("DATA_SIMULATIONS_CACHE_PATH")
+
 BASE_CACHE_PATH = os.getenv("BASE_CACHE_PATH")
 BASE_RESULTS_PATH = os.getenv("BASE_RESULTS_PATH")
+
+os.makedirs(BASE_CACHE_PATH, exist_ok=True)
+os.makedirs(BASE_RESULTS_PATH, exist_ok=True)
 
 
 # Configuration parameters for simulations
