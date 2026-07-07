@@ -117,7 +117,9 @@ try:
         BASE_CACHE_PATH, 
         BASE_RESULTS_PATH, 
         DB_ANPHY_PATH, 
-        BASE_PARAMS_FILE
+        BASE_PARAMS_FILE,
+        LOGGING_BASE_PATH,
+        LOGGING_LEVEL,
     )
     from src.post_processing.asymmetry_plotter import run_full_postprocessing
 except ImportError as _exc:  # pragma: no cover
@@ -134,14 +136,18 @@ except ImportError as _exc:  # pragma: no cover
 # Configuración de logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=LOGGING_LEVEL.upper(),
     format="[%(asctime)s] %(levelname)-8s %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("batch_iga_anphy")
 
+logging_path = Path(LOGGING_BASE_PATH + "/batch_iga_anphy.log") if LOGGING_BASE_PATH else None
+if not logging_path:
+    logger.warning("No se definió LOGGING_BASE_PATH; logs no se guardarán en archivo.")
+
 # Permite ajustar nivel vía variable de entorno
-if os.environ.get("ANPHY_LOG_LEVEL", "").upper() == "DEBUG":
+if os.environ.get("ANPHY_LOG_LEVEL", LOGGING_LEVEL).upper() == "DEBUG":
     logger.setLevel(logging.DEBUG)
 
 # ===========================================================================
@@ -177,8 +183,8 @@ def _env_int(var: str, default: int) -> int:
 # CONFIGURACIÓN GLOBAL (todas vía variables de entorno)
 # ===========================================================================
 
-PARAMS_FILE: Path = Path(_env("ANPHY_BATCH_PARAMS_FILE", "batch_params_anphy.txt"))
-ANPHY_DB_PATH: Path = Path(_env("ANPHY_DB_PATH", DB_ANPHY_PATH))
+PARAMS_FILE: Path = Path(_env("ANPHY_BATCH_PARAMS_FILE", BASE_PARAMS_FILE + "/batch_params_anphy.txt"))
+ANPHY_DB_PATH: Path = Path(_env("ANPHY_DB_PATH", DB_ANPHY_PATH + "/osfstorage"))
 OUTPUT_DIR: Path = Path(_env("ANPHY_OUTPUT_DIR", BASE_RESULTS_PATH))
 CACHE_DIR: Path = Path(_env("ANPHY_CACHE_DIR", BASE_CACHE_PATH))
 
@@ -197,7 +203,7 @@ L_FREQ: float = _env_float("ANPHY_L_FREQ", 1.0)
 H_FREQ: float = _env_float("ANPHY_H_FREQ", 40.0)
 
 # Ruta al script del pipeline (relativa a este archivo)
-PIPELINE_SCRIPT: Path = _SCRIPT_DIR.parent / "pipelines" / "test_iga_from_eeg_latent_anphy.py"
+PIPELINE_MODULE: Path = "src.pipelines.test_iga_from_eeg_latent_anphy"
 
 # Sub-ruta dentro de OUTPUT_DIR donde el pipeline coloca resultados
 _PIPELINE_OUT_SUBPATH = "anphy"
@@ -222,8 +228,8 @@ class BatchRunnerAnphy:
         if not PARAMS_FILE.exists():
             logger.error("Archivo de parámetros no encontrado: %s", PARAMS_FILE)
             sys.exit(1)
-        if not PIPELINE_SCRIPT.exists():
-            logger.error("Script del pipeline no encontrado: %s", PIPELINE_SCRIPT)
+        if not _PROJECT_ROOT.exists():
+            logger.error("Raíz del proyecto no encontrada: %s", _PROJECT_ROOT)
             sys.exit(1)
         if not ANPHY_DB_PATH.exists():
             logger.warning("Ruta de ANPHY no encontrada: %s", ANPHY_DB_PATH)
@@ -232,14 +238,14 @@ class BatchRunnerAnphy:
 
         # Archivo de log CSV con timestamp para no sobrescribir corridas previas
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file = OUTPUT_DIR / f"batch_log_anphy_{ts}.csv"
+        self.log_file = logging_path / f"batch_log_anphy_{ts}.csv"
         self._init_csv_log()
 
         logger.info("=" * 70)
         logger.info("  BATCH IgA -- ANPHY-Sleep")
         logger.info("=" * 70)
         logger.info("  Params file : %s", PARAMS_FILE)
-        logger.info("  Pipeline    : %s", PIPELINE_SCRIPT)
+        logger.info("  Pipeline    : %s", PIPELINE_MODULE)
         logger.info("  ANPHY DB    : %s", ANPHY_DB_PATH)
         logger.info("  Output dir  : %s", OUTPUT_DIR)
         logger.info("  Cache dir   : %s", CACHE_DIR)
@@ -411,7 +417,7 @@ class BatchRunnerAnphy:
         # aquí solo pasamos los parámetros esenciales y flags.
         cmd = [
             sys.executable,
-            str(PIPELINE_SCRIPT),
+            "-m", PIPELINE_MODULE,
             "--subject", subject,
             "--t-start", str(t_start),
             "--t-end", str(t_end),
@@ -453,6 +459,7 @@ class BatchRunnerAnphy:
                 stderr=subprocess.STDOUT,
                 text=True,
                 check=False,
+                cwd=_PROJECT_ROOT,
             )
 
             # Volcar stdout del pipeline al logger

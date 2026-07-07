@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 import numpy as np
 
-from src.utils.config import DB_ANPHY_PATH
+from src.utils.config import DB_ANPHY_PATH, BASE_PARAMS_FILE
 
 try:
     import h5py
@@ -144,7 +144,7 @@ def main() -> int:
     parser.add_argument(
         "--out",
         type=str,
-        default="./batch_params_anphy.txt",
+        default=BASE_PARAMS_FILE + "/batch_params_anphy.txt",
         help="Archivo de salida TXT (listas Python)",
     )
     parser.add_argument(

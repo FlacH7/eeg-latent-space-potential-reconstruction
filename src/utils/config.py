@@ -26,6 +26,12 @@ os.makedirs(BASE_CACHE_PATH, exist_ok=True)
 os.makedirs(BASE_RESULTS_PATH, exist_ok=True)
 os.makedirs(BASE_PARAMS_FILE, exist_ok=True)
 
+# Logging
+LOGGING_BASE_PATH = os.getenv("LOGGING_BASE_PATH")
+LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO")
+
+os.makedirs(LOGGING_BASE_PATH, exist_ok=True)
+
 
 # Configuration parameters for simulations
 BURN_RATIO = 0.1

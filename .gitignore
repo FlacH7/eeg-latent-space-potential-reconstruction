@@ -10,6 +10,7 @@ cache/
 results/
 constants/
 params/
+logs/
 
 # Distribution / packaging
 .Python

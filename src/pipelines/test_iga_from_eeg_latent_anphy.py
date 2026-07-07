@@ -138,7 +138,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    if  not args.out_dir:
+    if args.out_dir is None:
         args.out_dir = BASE_RESULTS_PATH
     verbose = "INFO" if args.verbose else None
 
@@ -150,7 +150,7 @@ def main() -> int:
     if args.subject is None:
         args.subject = "EPCTL01"
     if args.file is None:
-        args.file = f"{DB_ANPHY_PATH}/{args.subject}/{args.subject}.edf"
+        args.file = f"{DB_ANPHY_PATH}/osfstorage/{args.subject}/{args.subject}.edf"
     if args.t_start is None:
         args.t_start = 13710.0
     if args.t_end is None:

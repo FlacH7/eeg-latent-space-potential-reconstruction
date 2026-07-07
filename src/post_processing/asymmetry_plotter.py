@@ -19,7 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from src.utils.io import load_potential, find_potential_files
-from postprocess_potentials import (
+from src.post_processing.postprocess_potentials import (
     detect_basins_gradient_following,
     compute_basin_asymmetry,
 )
