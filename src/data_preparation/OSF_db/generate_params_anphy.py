@@ -136,9 +136,9 @@ def main() -> int:
         description="Genera batch_params para ANPHY-Sleep (bloques ≥ 10 epochs)"
     )
     parser.add_argument(
-        "base_dir",
+        "--base_dir",
         type=str,
-        default=DB_ANPHY_PATH + "/osfstorage",
+        default=DB_ANPHY_PATH + "/osftorage",
         help="Carpeta base que contiene EPCTLXX/, Artifact matrix/, etc.",
     )
     parser.add_argument(
