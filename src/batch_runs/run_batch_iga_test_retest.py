@@ -135,9 +135,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("batch_iga_test_retest")
 
-logging_path = Path(LOGGING_BASE_PATH + "/batch_iga_test_retest.log") if LOGGING_BASE_PATH else None
+logging_path = Path(LOGGING_BASE_PATH + "/batch_iga_test_retest") if LOGGING_BASE_PATH else None
 if not logging_path:
     logger.warning("No se definió LOGGING_BASE_PATH; logs no se guardarán en archivo.")
+else:
+    os.makedirs(logging_path, exist_ok=True)
 
 if os.environ.get("TEST_RETEST_LOG_LEVEL", LOGGING_LEVEL).upper() == "DEBUG":
     logger.setLevel(logging.DEBUG)
