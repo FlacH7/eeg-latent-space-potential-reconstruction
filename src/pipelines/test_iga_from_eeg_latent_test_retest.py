@@ -1,30 +1,23 @@
+#!/usr/bin/env python3
 """
-test_iga_from_eeg_latent.py
-===========================
-Pipeline de Kramers-Moyal + IgA reconstruction a partir de un espacio
-latente EEG extraido via ``extract_latent_space``.
+test_iga_from_eeg_latent_test_retest.py
+=======================================
+Pipeline de Kramers-Moyal + IgA reconstruction para EEG del dataset
+test-retest (OpenNeuro, BIDS/BrainVision).
 
-Este script replica la estructura de ``test_iga_epileptor.py`` pero en
-lugar de cargar datos desde un fichero ``.jld2``, obtiene la serie
-temporal del subespacio latente de un EEG usando el pipeline completo:
-    raw EEG → ICA → ICLabel → seleccion de subespacio (Markov/FC/etc.)
-
-La serie latente se pasa luego al estimador Kramers-Moyal y al
-reconstructor de potencial via Galerkin-B-spline (IgA).
+Carga un segmento de EEG vía ``load_test_retest_eeg_from_ids``,
+extrae el espacio latente vía ICA + selección de subespacio, y aplica
+el estimador Kramers-Moyal y la reconstrucción de potencial via
+Galerkin-B-spline (IgA).
 
 Usage::
 
-    # Usar datos MNE de muestra (default)
-    python test_iga_from_eeg_latent.py
+    # Tarea individual
+    python test_iga_from_eeg_latent_test_retest.py --subject sub-01 \\
+        --session session1 --task eyesclosed --t-start 0 --t-end 60
 
-    # Con un fichero EEG propio
-    python test_iga_from_eeg_latent.py --file /path/to/recording.fif --n-dim 2
-
-    # Usar solo 1 dimension latente para el analisis KM
-    python test_iga_from_eeg_latent.py --analysis-dim 1 --column 0
-
-    # Forzar recalculo del espacio latente (ignorar cache)
-    python test_iga_from_eeg_latent.py --ignore-cache
+    # Forzar recálculo del espacio latente
+    python test_iga_from_eeg_latent_test_retest.py --subject sub-01 ... --ignore-cache
 """
 
 from __future__ import annotations
@@ -47,13 +40,10 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-# Añade el directorio padre (programas/) a sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.latent_space_extraction.siena_eeg import load_siena_eeg
 from src.latent_space_extraction.extract_latent_subspace import extract_latent_space
 
-# km_tools_v2 must be available in the environment
 from src.potential_reconstruction.km_tools_v2 import (
     extract_km_coefficients,
     plot_km_components,
@@ -65,50 +55,50 @@ from src.potential_reconstruction.km_tools_v2 import (
 )
 from src.potential_reconstruction.bw_optimization import optimal_bw
 
+from src.latent_space_extraction.test_retest_eeg import load_test_retest_eeg_from_ids
+
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
+
+from src.utils.io import save_potential
 
 from src.utils.config import (
     CONFIGS,
-    BASE_RESULTS_PATH, 
+    BASE_RESULTS_PATH,
     BASE_CACHE_PATH,
-    DB_SIENA_PATH,
-    )
-from src.utils.io import save_potential
+    DB_TEST_RETEST_PATH,
+)
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="KM + IgA pipeline from EEG latent subspace",
+        description="KM + IgA pipeline from test-retest EEG (BIDS/BrainVision)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # ---- EEG source ----
-    parser.add_argument("--file", type=str, default=None,
-                        help="Path to raw EEG file (.fif, .edf, .bdf, ...). "
-                             "Uses MNE sample data if omitted.")
-    parser.add_argument("--patient", type=str, default="PN01",
-                        help="Patient ID for Siena EEG data.")
-    parser.add_argument("--record", type=str, default="1",
-                        help="Patient record for Siena EEG data.")
+    parser.add_argument("--subject", type=str, required=True,
+                        help="Subject ID (e.g. sub-01)")
+    parser.add_argument("--session", type=str, required=True,
+                        help="Session ID (e.g. session1)")
+    parser.add_argument("--task", type=str, required=True,
+                        help="Task label (eyesclosed, eyesopen, mathematic, memory, music)")
+    parser.add_argument("--db-path", type=str, default=None,
+                        help="Override BIDS dataset root path")
     parser.add_argument("--t-start", type=float, default=None,
                         help="Start time (s) for EEG segment to analyze.")
     parser.add_argument("--t-end", type=float, default=None,
                         help="End time (s) for EEG segment to analyze.")
     # ---- Cache / persistence ----
-    parser.add_argument("--cache-file", type=str, default="eeg_latent_cache.npz",
-                        help="Path to cache file for the latent space. "
-                             "If it exists and --ignore-cache is not set, "
-                             "the extraction stage is skipped and the latent "
-                             "space is loaded from this file.")
+    parser.add_argument("--cache-file", type=str, default=None,
+                        help="Path to cache file for the latent space.")
     parser.add_argument("--ignore-cache", action="store_true",
-                        help="Ignore an existing cache file and force "
-                             "recomputation of the latent space.")
+                        help="Ignore an existing cache file and force recomputation.")
     # ---- Latent-space extraction params ----
     parser.add_argument("--latent-dim", type=int, default=2,
-                        help="Dimensionality of the latent subspace to extract "
-                             "from EEG (default: 2)")
+                        help="Dimensionality of the latent subspace (default: 2)")
     parser.add_argument("--scoring-method", type=str, default="markov",
                         choices=["markov", "conservative", "weighted",
                                  "sequential", "pareto", "independent"],
@@ -121,71 +111,108 @@ def _parse_args() -> argparse.Namespace:
                         help="Number of parallel processes for subspace search")
     # ---- Which latent dimension(s) to feed into KM ----
     parser.add_argument("--analysis-dim", type=int, default=None,
-                        help="Number of latent dimensions to use for the KM "
-                             "analysis. If None, uses all extracted dimensions.")
+                        help="Number of latent dimensions to use for KM. "
+                             "If None, uses all extracted dimensions.")
     parser.add_argument("--column", type=int, default=None,
-                        help="If analysis-dim=1, which latent column to use "
-                             "(0=first, 1=second, etc.). Default: 0.")
+                        help="If analysis-dim=1, which latent column to use (0=first).")
     # ---- Preprocessing params ----
     parser.add_argument("--l-freq", type=float, default=1.0)
     parser.add_argument("--h-freq", type=float, default=40.0)
     parser.add_argument("--ica-method", type=str, default="picard")
-    parser.add_argument("--verbose", action="store_true", default = True)
+    parser.add_argument("--verbose", action="store_true", default=True)
     # ---- Output ----
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory to save plots (default: current)")
-    parser.add_argument("--period-label", type=str, default="unknown",
-                        help="Label for the period (pre-ictal, inter-ictal, "
-                             "post-ictal). Used in output directory naming.")
+    # ---- Save potential ----
     parser.add_argument("--save-potential", action="store_true", default=True,
-                    help="Guardar datos del potencial en .npz para post-procesamiento")
+                        help="Guardar datos del potencial en .npz para post-procesamiento")
     parser.add_argument("--no-save-potential", action="store_true",
-                    help="Deshabilitar el guardado del potencial")
-    
+                        help="Deshabilitar el guardado del potencial")
+
     return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
-print(DB_SIENA_PATH)
+
+
 def main() -> int:
     args = _parse_args()
-    if args.file is None:
-        args.file = Path(f"{DB_SIENA_PATH}/{args.patient}/{args.patient}-{args.record}.edf")
-    
     if args.out_dir is None:
         args.out_dir = BASE_RESULTS_PATH
-        
+    verbose = "INFO" if args.verbose else None
+
+    save_potential_flag = args.save_potential and not args.no_save_potential
+
+    # Defaults
     if args.t_start is None:
         args.t_start = 0.0
-        
     if args.t_end is None:
         args.t_end = 60.0
-        
-    verbose = "INFO" if args.verbose else None
-    
-    if args.out_dir is None:
-        args.out_dir = BASE_RESULTS_PATH
-        
-    out_dir = Path(args.out_dir + f"/siena/{args.patient}-{args.record}/{args.latent_dim}_latent_dim/from{args.t_start}_to_{args.t_end}_{args.period_label}")
+
+    db_path = args.db_path or DB_TEST_RETEST_PATH
+
+    # -----------------------------------------------------------------
+    # Output directory: test_retest/<subject>/<session>/<task>/from{t_start}_to_{t_end}
+    # -----------------------------------------------------------------
+    out_dir = Path(
+        args.out_dir
+        + f"/test_retest/{args.subject}/{args.session}"
+        + f"/{args.latent_dim}_latent_dim"
+        + f"/from{args.t_start}s_to_{args.t_end}s_{args.task}"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     overall_t0 = time.time()
 
     # =====================================================================
-    # 1. EXTRACT (or LOAD CACHED) LATENT SUBSPACE FROM EEG
+    # 1. LOAD EEG SEGMENT
     # =====================================================================
     print("=" * 70)
+    print("  STAGE 0: LOAD TEST-RETEST EEG SEGMENT")
+    print("=" * 70)
+
+    try:
+        raw = load_test_retest_eeg_from_ids(
+            subject=args.subject,
+            session=args.session,
+            task=args.task,
+            db_path=db_path,
+            t_start=args.t_start,
+            t_stop=args.t_end,
+            preload=False,
+            verbose=verbose,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    sfreq = raw.info["sfreq"]
+    print(f"  Selected channels : {len(raw.ch_names)} (test-retest valid)")
+    print(f"  Channel names     : {raw.ch_names}")
+    print(f"  Sampling freq     : {sfreq:.2f} Hz")
+    print(f"  Cropped window    : {raw.times[0]:.2f} s -> {raw.times[-1]:.2f} s "
+          f"(duration: {raw.times[-1] - raw.times[0]:.2f} s)")
+
+    # =====================================================================
+    # 2. EXTRACT (or LOAD CACHED) LATENT SUBSPACE FROM EEG
+    # =====================================================================
+    print("\n" + "=" * 70)
     print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM EEG")
     print("=" * 70)
-    
-    cache_path = Path(BASE_CACHE_PATH+f"/cache_eeg_siena/{args.patient}-{args.record}/from{args.t_start}_to_{args.t_end}_latent_dim_{args.latent_dim}.npz")
-    # cache_path = Path(args.cache_file)
+
+    if args.cache_file is None:
+        args.cache_file = Path(
+            BASE_CACHE_PATH
+            + f"/cache_eeg_test_retest/{args.subject}/{args.session}"
+            + f"/task_{args.task}_latent_dim_{args.latent_dim}"
+            + f"/from{args.t_start}s_to_{args.t_end}s.npz"
+        )
+    cache_path = Path(args.cache_file)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    # -----------------------------------------------------------------
+
     # Try to load from cache
-    # -----------------------------------------------------------------
     if cache_path.exists() and not args.ignore_cache:
         print(f"\n  [CACHE] Found existing cache: {cache_path}")
         print("  [CACHE] Loading latent space and metadata...")
@@ -193,23 +220,17 @@ def main() -> int:
         latent = loaded["latent"]
         meta = loaded["meta"].item()
         print("  [CACHE] Loaded successfully.")
-        # Ensure meta has the expected keys for downstream compatibility
         if "preprocessing" not in meta or "elapsed_time" not in meta:
             print("  [WARN] Cache file seems corrupted or outdated. Recomputing...")
-            args.ignore_cache = True  # force recompute on next branch
+            args.ignore_cache = True
 
-    # -----------------------------------------------------------------
     # Compute if no cache or --ignore-cache
-    # -----------------------------------------------------------------
     if not cache_path.exists() or args.ignore_cache:
         if args.ignore_cache and cache_path.exists():
             print("\n  [CACHE] --ignore-cache set. Recomputing latent space...")
 
-        print("Using Siena EEG data...")
-        raw_input = load_siena_eeg(args.file, t_minutes=(args.t_start, args.t_end), verbose=verbose, preload=False)
-
         latent, meta = extract_latent_space(
-            raw_input,
+            raw,
             n_dim=args.latent_dim,
             scoring_method=args.scoring_method,
             fc_metric=args.fc_metric,
@@ -221,7 +242,6 @@ def main() -> int:
             verbose=verbose,
         )
 
-        # Save to cache for future runs
         print(f"\n  [CACHE] Saving latent space to: {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache_path, latent=latent, meta=np.array(meta, dtype=object))
@@ -229,19 +249,15 @@ def main() -> int:
 
     # latent shape: (n_samples, latent_dim)
     n_samples, latent_dim = latent.shape
-    sfreq = meta["preprocessing"]["sfreq"]
     dt = 1.0 / sfreq
-    print("dt = ", dt)
-
-    print(f"\n  Latent space shape : {latent.shape}")
-    print(f"  Sampling freq      : {sfreq:.2f} Hz")
-    print(f"  dt                 : {dt:.6f} s")
+    print(f"\n  dt = {dt:.6f} s")
+    print(f"  Latent space shape : {latent.shape}")
     print(f"  Selected ICs       : {meta['selected_indices']}")
     print(f"  Scores             : {meta['latent_scores']}")
     print(f"  Extraction time    : {meta['elapsed_time']:.1f} s")
 
     # =====================================================================
-    # 2. SELECT DIMENSION(S) FOR KM ANALYSIS
+    # 3. SELECT DIMENSION(S) FOR KM ANALYSIS
     # =====================================================================
     analysis_dim = args.analysis_dim if args.analysis_dim is not None else latent_dim
 
@@ -254,16 +270,16 @@ def main() -> int:
         col = args.column if args.column is not None else 0
         if col >= latent_dim:
             raise ValueError(f"column ({col}) must be < latent-dim ({latent_dim})")
-        data = latent[:, col:col + 1]  # shape (n_samples, 1)
+        data = latent[:, col:col + 1]
         print(f"\n  Using latent column {col} for 1D KM analysis")
     else:
-        data = latent[:, :analysis_dim]  # shape (n_samples, analysis_dim)
+        data = latent[:, :analysis_dim]
         print(f"\n  Using first {analysis_dim} latent columns for KM analysis")
 
     D = analysis_dim
     print(f"  Data shape for KM  : {data.shape}")
 
-    # Optional: plot the latent time series
+    # Plot latent time series
     fig_ts, axes = plt.subplots(D, 1, figsize=(14, 2.5 * D), squeeze=False)
     for d in range(D):
         ax = axes[d, 0]
@@ -275,10 +291,10 @@ def main() -> int:
     fig_ts.savefig(out_dir / "latent_timeseries.png", dpi=150)
     plt.close(fig_ts)
     print(f"  Saved latent_timeseries.png")
-    
-    data = outliers_cleaning(data, method='iqr', threshold= 5)
-    
-    # Optional: plot the latent time series
+
+    data = outliers_cleaning(data, method="iqr", threshold=5)
+
+    # Plot cleaned
     fig_ts, axes = plt.subplots(D, 1, figsize=(14, 2.5 * D), squeeze=False)
     for d in range(D):
         ax = axes[d, 0]
@@ -292,22 +308,21 @@ def main() -> int:
     print(f"  Saved latent_timeseries_cleaned.png")
 
     # =====================================================================
-    # 3. CONFIGURATION
+    # 4. CONFIGURATION
     # =====================================================================
     config = CONFIGS['base_2D_model'].copy()
     config.update({
-        "model_name": f"eeg_latent_d{latent_dim}_{args.scoring_method}",
+        "model_name": f"testretest_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{args.scoring_method}",
         "D": D,
         "bins": [50] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
         "degree": 2,
     })
-
     print(f"\n  KM config: {config}")
 
     # =====================================================================
-    # 4. BANDWIDTH OPTIMISATION
+    # 5. BANDWIDTH OPTIMISATION
     # =====================================================================
     print("\n" + "=" * 70)
     print("  STAGE 2: BANDWIDTH OPTIMISATION")
@@ -331,13 +346,12 @@ def main() -> int:
     print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
     print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
 
-    # Save BW plot
     if "fig" in result_bw:
         result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
         plt.close(result_bw["fig"])
 
     # =====================================================================
-    # 5. ESTIMATE KM COEFFICIENTS
+    # 6. ESTIMATE KM COEFFICIENTS
     # =====================================================================
     print("\n" + "=" * 70)
     print("  STAGE 3: KM COEFFICIENT ESTIMATION")
@@ -357,8 +371,9 @@ def main() -> int:
     print(f"\n  Drift shape    : {drift.shape}")
     print(f"  Diffusion shape: {diffusion.shape}")
     print(f"  Bins           : {[len(e) for e in edges]}")
+
     # =====================================================================
-    # 6. EMPIRICAL DENSITY
+    # 7. EMPIRICAL DENSITY
     # =====================================================================
     print("\n" + "=" * 70)
     print("  STAGE 4: EMPIRICAL DENSITY")
@@ -376,7 +391,7 @@ def main() -> int:
     print(f"  Density shape: {density.shape}")
 
     # =====================================================================
-    # 7. PLOT KM COMPONENTS
+    # 8. PLOT KM COMPONENTS
     # =====================================================================
     print("\n" + "=" * 70)
     print("  STAGE 5: PLOT KM COMPONENTS")
@@ -391,7 +406,7 @@ def main() -> int:
         figsize=(12, 8),
     )
     plt.suptitle(
-        f"{config['model_name'].upper()} — D^1 and D^2 estimated",
+        f"{config['model_name'].upper()} -- D^1 and D^2 estimated",
         fontsize=14,
     )
     plt.tight_layout(rect=[0, 0, 1, 0.95])
@@ -400,7 +415,7 @@ def main() -> int:
     print(f"  Saved km_components.png")
 
     # =====================================================================
-    # 8. 1D POTENTIAL RECONSTRUCTION
+    # 9. 1D POTENTIAL RECONSTRUCTION
     # =====================================================================
     print("\n" + "=" * 70)
     print("  STAGE 6: 1D POTENTIAL RECONSTRUCTION (IgA)")
@@ -419,7 +434,7 @@ def main() -> int:
         figsize=(5 * D, 4),
     )
     plt.suptitle(
-        f"{config['model_name'].upper()} — Reconstructed 1D potential (IgA)"
+        f"{config['model_name'].upper()} -- Reconstructed 1D potential (IgA)"
     )
     plt.tight_layout()
     fig_pot_1d.savefig(out_dir / "potential_1d.png", dpi=150)
@@ -427,7 +442,7 @@ def main() -> int:
     print(f"  Saved potential_1d.png")
 
     # =====================================================================
-    # 9. FULL MULTIDIMENSIONAL POTENTIAL RECONSTRUCTION
+    # 10. FULL MULTIDIMENSIONAL POTENTIAL RECONSTRUCTION
     # =====================================================================
     print("\n" + "=" * 70)
     print("  STAGE 7: FULL MULTIDIMENSIONAL POTENTIAL (IgA)")
@@ -463,21 +478,19 @@ def main() -> int:
         is_eq = result_iga["is_equilibrium"]
         print(f"  Non-equilibrium metric eta: {eta:.4f}")
         print(f"  Detailed balance? {is_eq} (threshold eta < 0.1)")
-        
-    # =====================================================================
-    # 9b. GUARDAR DATOS DEL POTENCIAL PARA POST-PROCESAMIENTO
-    # =====================================================================
-    save_potential_flag = args.save_potential and not args.no_save_potential
 
+    # =====================================================================
+    # 10b. GUARDAR DATOS DEL POTENCIAL PARA POST-PROCESAMIENTO
+    # =====================================================================
     if save_potential_flag:
         print("\n" + "-" * 50)
         print("  SAVING POTENTIAL DATA FOR POST-PROCESSING")
         print("-" * 50)
 
         metadata = {
-            "patient": args.patient,
-            "record": args.record,
-            "period_label": args.period_label,
+            "subject": args.subject,
+            "session": args.session,
+            "task": args.task,
             "t_start": args.t_start,
             "t_end": args.t_end,
             "latent_dim": latent_dim,
@@ -497,17 +510,16 @@ def main() -> int:
         print(f"  Potential data saved: {potential_path}")
 
     # =====================================================================
-    # 10. PLOT POTENCIAL 2D / SLICES (D >= 2)
+    # 11. PLOT POTENCIAL 2D / SLICES (D >= 2)
     # =====================================================================
     print("\n" + "=" * 70)
     print("  STAGE 8: PLOT POTENCIAL 2D / SLICES")
     print("=" * 70)
 
     if D == 2:
-        # --- Potencial 2D reconstruido ---
         fig_pot_2d = plot_potential_2d(
             U_rec, edges,
-            title_est=f"{config['model_name'].upper()} — Reconstructed",
+            title_est=f"{config['model_name'].upper()} -- Reconstructed",
             figsize=(12, 5),
             unify_colorbar=True,
             align_minima=True,
@@ -520,7 +532,6 @@ def main() -> int:
         plt.close(fig_pot_2d)
         print("  Saved potential_2d.png")
 
-        # --- Residuo de Helmholtz ||r|| ---
         if "residual" in result_iga:
             residual = result_iga["residual"]
             r_norm = np.sqrt(np.nansum(residual**2, axis=0))
@@ -531,7 +542,7 @@ def main() -> int:
             plt.colorbar(label="||r||")
             plt.xlabel("x")
             plt.ylabel("y")
-            plt.title(f"Residuo Helmholtz (no-equilibrio) — {config['model_name'].upper()}")
+            plt.title(f"Residuo Helmholtz (no-equilibrio) -- {config['model_name'].upper()}")
             plt.axis("equal")
             plt.tight_layout()
             fig_res.savefig(out_dir / "potential_2d_residual.png", dpi=150)
@@ -539,13 +550,12 @@ def main() -> int:
             print("  Saved potential_2d_residual.png")
 
     elif D >= 3:
-        # --- Cortes 2D para D >= 3 ---
         dim_pairs = [(i, j) for i in range(min(D, 3)) for j in range(i + 1, min(D, 3))]
         for dims in dim_pairs:
             fig_slice = plot_potential_slice(
                 U_rec, edges, dims=dims,
                 fixed_coords={d: 0.0 for d in range(D) if d not in dims},
-                title=f"{config['model_name'].upper()} — Reconstructed (slice x{dims[0]+1}-x{dims[1]+1})",
+                title=f"{config['model_name'].upper()} -- Reconstructed (slice x{dims[0]+1}-x{dims[1]+1})",
                 figsize=(12, 5),
                 unify_colorbar=True,
                 align_minima=True,
@@ -562,14 +572,20 @@ def main() -> int:
         print("  (Skipping 2D/slice plots for D=1)")
 
     # =====================================================================
-    # 11. SUMMARY
+    # 12. SUMMARY
     # =====================================================================
     total_time = time.time() - overall_t0
     print("\n" + "=" * 70)
     print("  PIPELINE COMPLETED SUCCESSFULLY")
     print("=" * 70)
-    print(f"  Total wall-clock time: {total_time:.1f} s")
-    print(f"  Output saved to: {out_dir.absolute()}")
+    print(f"  Subject             : {args.subject}")
+    print(f"  Session             : {args.session}")
+    print(f"  Task                : {args.task}")
+    print(f"  Time window         : {args.t_start:.1f}s -> {args.t_end:.1f}s")
+    print(f"  Total wall-clock    : {total_time:.1f} s")
+    print(f"  Output saved to     : {out_dir.absolute()}")
+    if save_potential_flag:
+        print(f"  Potential data      : {out_dir / 'potential_data.npz'}")
 
     return 0
 
