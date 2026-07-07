@@ -138,7 +138,7 @@ def main() -> int:
     parser.add_argument(
         "--base_dir",
         type=str,
-        default=DB_ANPHY_PATH + "/osftorage",
+        default=DB_ANPHY_PATH + "/osfstorage",
         help="Carpeta base que contiene EPCTLXX/, Artifact matrix/, etc.",
     )
     parser.add_argument(

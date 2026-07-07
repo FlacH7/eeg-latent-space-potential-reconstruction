@@ -113,7 +113,12 @@ for _p in (_PROJECT_ROOT, _PROJECT_ROOT / "src"):
 # Imports del proyecto
 # ---------------------------------------------------------------------------
 try:
-    from src.utils.config import BASE_CACHE_PATH, BASE_RESULTS_PATH, DB_ANPHY_PATH
+    from src.utils.config import (
+        BASE_CACHE_PATH, 
+        BASE_RESULTS_PATH, 
+        DB_ANPHY_PATH, 
+        BASE_PARAMS_FILE
+    )
     from src.post_processing.asymmetry_plotter import run_full_postprocessing
 except ImportError as _exc:  # pragma: no cover
     # Fallback amigable si se ejecuta sin el entorno del proyecto configurado
