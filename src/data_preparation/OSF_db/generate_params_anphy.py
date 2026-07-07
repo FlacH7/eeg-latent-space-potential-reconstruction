@@ -150,7 +150,7 @@ def main() -> int:
     parser.add_argument(
         "--csv",
         type=str,
-        default="./batch_params_anphy.csv",
+        default=BASE_PARAMS_FILE + "/batch_params_anphy.csv",
         help="Archivo de salida CSV",
     )
     parser.add_argument(

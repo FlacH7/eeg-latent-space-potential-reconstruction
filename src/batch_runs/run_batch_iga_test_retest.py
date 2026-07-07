@@ -460,32 +460,32 @@ class BatchRunnerTestRetest:
 
         t0 = time.time()
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                check=False,
                 cwd=_PROJECT_ROOT,
             )
 
-            if result.stdout:
-                for line in result.stdout.splitlines():
-                    logger.info("  [PIPE] %s", line)
+            # Stream stdout en tiempo real
+            for line in proc.stdout:
+                logger.info("  [PIPE] %s", line.rstrip())
 
+            proc.wait()
             elapsed = time.time() - t0
-            success = result.returncode == 0
+            success = proc.returncode == 0
 
             self._write_csv_log(
                 subject, session, task, t_start, t_end, label,
-                success, result.returncode, elapsed, cmd,
+                success, proc.returncode, elapsed, cmd,
             )
 
             if success:
                 logger.info("OK | %s/%s/%s (%.1f s)", subject, session, task, elapsed)
             else:
                 logger.error("ERROR | %s/%s/%s -- código %d",
-                             subject, session, task, result.returncode)
+                             subject, session, task, proc.returncode)
 
             return key, success
 
