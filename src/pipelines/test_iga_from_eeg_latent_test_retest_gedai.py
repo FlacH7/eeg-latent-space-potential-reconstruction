@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-test_iga_from_eeg_latent_anphy.py
-==================================
-Pipeline de Kramers-Moyal + IgA reconstruction para EEG de ANPHY-Sleep.
-Adaptación directa de test_iga_from_eeg_latent_siena_db.py.
+test_iga_from_eeg_latent_test_retest_gedai.py
+=============================================
+Pipeline de Kramers-Moyal + IgA reconstruction para EEG del dataset
+test-retest preprocesado con **Gedai** (formato EEGLAB .set/.fdt).
 
-Carga un segmento (epoch) de un sujeto ANPHY-Sleep, extrae el espacio latente
-vía ICA + selección de subespacio, y aplica el estimador Kramers-Moyal y la
-reconstrucción de potencial via Galerkin-B-spline (IgA).
+Carga un segmento de EEG via ``load_test_retest_gedai_eeg_from_ids``,
+extrae el espacio latente via ICA + seleccion de subespacio, y aplica
+el estimador Kramers-Moyal y la reconstruccion de potencial via
+Galerkin-B-spline (IgA).
 
 Usage::
 
-    # Epoch individual
-    python test_iga_from_eeg_latent_anphy.py --subject EPCTL01 --file /path/to/EPCTL01.edf \\
-        --t-start 450 --t-end 480 --stage-label W --epoch-idx 15
+    # Tarea individual
+    python test_iga_from_eeg_latent_test_retest_gedai.py --subject sub-01 \\
+        --session session1 --task eyesclosed --t-start 0 --t-end 60
 
     # Forzar recalculo del espacio latente
-    python test_iga_from_eeg_latent_anphy.py --subject EPCTL01 ... --ignore-cache
+    python test_iga_from_eeg_latent_test_retest_gedai.py --subject sub-01 ... --ignore-cache
 """
 
 from __future__ import annotations
@@ -39,12 +40,11 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-# Anade el directorio padre a sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.latent_space_extraction.extract_latent_subspace import extract_latent_space
 
-from potential_reconstruction.km_tools_v2 import (
+from src.potential_reconstruction.km_tools_v2 import (
     extract_km_coefficients,
     plot_km_components,
     reconstruct_potential,
@@ -53,41 +53,45 @@ from potential_reconstruction.km_tools_v2 import (
     plot_potential_2d,
     plot_potential_slice,
 )
-from potential_reconstruction.bw_optimization import optimal_bw
+from src.potential_reconstruction.bw_optimization import optimal_bw
 
-from src.latent_space_extraction.anphy_eeg import load_anphy_eeg
+from src.latent_space_extraction.test_retest_gedai_eeg import load_test_retest_gedai_eeg_from_ids
 
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
 
 from src.utils.io import save_potential
 
+from src.plotters.trajectory_plots import plot_latent_trajectory
+
 from src.utils.config import (
     CONFIGS,
-    BASE_RESULTS_PATH, 
+    BASE_RESULTS_PATH,
     BASE_CACHE_PATH,
-    DB_ANPHY_PATH
-    )
-# ------------------------------------------------
+    DB_TEST_RETEST_GEDAI_PATH,
+)
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="KM + IgA pipeline from ANPHY-Sleep EEG epochs",
+        description="KM + IgA pipeline from test-retest EEG preprocessed with Gedai (EEGLAB .set/.fdt)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # ---- EEG source ----
-    parser.add_argument("--file", type=str, default=None,
-                        help="Path to raw EEG file (.edf)")
-    parser.add_argument("--subject", type=str, default = None,
-                        help="Subject ID (e.g. EPCTL01)")
-    parser.add_argument("--epoch-idx", type=str, default="0",
-                        help="Epoch index (for cache naming)")
-    parser.add_argument("--t-start", type=float, default = None,
+    parser.add_argument("--subject", type=str, required=True,
+                        help="Subject ID (e.g. sub-01)")
+    parser.add_argument("--session", type=str, required=True,
+                        help="Session ID (e.g. session1)")
+    parser.add_argument("--task", type=str, required=True,
+                        help="Task label (eyesclosed, eyesopen, mathematic, memory, music)")
+    parser.add_argument("--db-path", type=str, default=None,
+                        help="Override Gedai dataset root path")
+    parser.add_argument("--t-start", type=float, default=None,
                         help="Start time (s) for EEG segment to analyze.")
-    parser.add_argument("--t-end", type=float, default = None,
+    parser.add_argument("--t-end", type=float, default=None,
                         help="End time (s) for EEG segment to analyze.")
     # ---- Cache / persistence ----
     parser.add_argument("--cache-file", type=str, default=None,
@@ -121,9 +125,7 @@ def _parse_args() -> argparse.Namespace:
     # ---- Output ----
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory to save plots (default: current)")
-    parser.add_argument("--stage-label", type=str, default=None,
-                        help="Sleep stage label (W, N1, N2, N3, R, L). Used in output path.")
-    # ---- NUEVO: Opcion para guardar/cargar datos del potencial ----
+    # ---- Save potential ----
     parser.add_argument("--save-potential", action="store_true", default=True,
                         help="Guardar datos del potencial en .npz para post-procesamiento")
     parser.add_argument("--no-save-potential", action="store_true",
@@ -136,36 +138,31 @@ def _parse_args() -> argparse.Namespace:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     args = _parse_args()
     if args.out_dir is None:
         args.out_dir = BASE_RESULTS_PATH
     verbose = "INFO" if args.verbose else None
 
-    # Guardar potencial por defecto a menos que se pase --no-save-potential
     save_potential_flag = args.save_potential and not args.no_save_potential
-    #-------------------------------------------------------
-    # Manual parameters
-    # ------------------------------------------------------
-    if args.subject is None:
-        args.subject = "EPCTL01"
-    if args.file is None:
-        args.file = f"{DB_ANPHY_PATH}/osfstorage/{args.subject}/{args.subject}.edf"
+
+    # Defaults
     if args.t_start is None:
-        args.t_start = 13710.0
+        args.t_start = 0.0
     if args.t_end is None:
-        args.t_end =  14460.0
-    if args.stage_label is None:
-        args.stage_label = "N2"
-    
+        args.t_end = 60.0
+
+    db_path = args.db_path or DB_TEST_RETEST_GEDAI_PATH
+
     # -----------------------------------------------------------------
-    # Output directory: iga_from_eeg_latent/anphy/<subject>/...
+    # Output directory: test_retest_gedai/<subject>/<session>/<task>/from{t_start}_to_{t_end}
     # -----------------------------------------------------------------
     out_dir = Path(
         args.out_dir
-        + f"/anphy/{args.subject}"
+        + f"/test_retest_gedai/{args.subject}/{args.session}"
         + f"/{args.latent_dim}_latent_dim_{args.scoring_method}"
-        + f"/epoch_{args.t_start}s_{args.t_end}s_{args.stage_label}"
+        + f"/from{args.t_start}s_to_{args.t_end}s_{args.task}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -175,12 +172,15 @@ def main() -> int:
     # 1. LOAD EEG SEGMENT
     # =====================================================================
     print("=" * 70)
-    print("  STAGE 0: LOAD ANPHY-SLEEP EEG SEGMENT")
+    print("  STAGE 0: LOAD TEST-RETEST EEG SEGMENT (GEDAI)")
     print("=" * 70)
 
     try:
-        raw = load_anphy_eeg(
-            args.file,
+        raw = load_test_retest_gedai_eeg_from_ids(
+            subject=args.subject,
+            session=args.session,
+            task=args.task,
+            db_path=db_path,
             t_start=args.t_start,
             t_stop=args.t_end,
             preload=False,
@@ -191,7 +191,7 @@ def main() -> int:
         return 1
 
     sfreq = raw.info["sfreq"]
-    print(f"  Selected channels : {len(raw.ch_names)} (ANPHY-valid)")
+    print(f"  Selected channels : {len(raw.ch_names)} (test-retest valid)")
     print(f"  Channel names     : {raw.ch_names}")
     print(f"  Sampling freq     : {sfreq:.2f} Hz")
     print(f"  Cropped window    : {raw.times[0]:.2f} s -> {raw.times[-1]:.2f} s "
@@ -203,14 +203,18 @@ def main() -> int:
     print("\n" + "=" * 70)
     print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM EEG")
     print("=" * 70)
+
     if args.cache_file is None:
-        args.cache_file = Path(BASE_CACHE_PATH+f"/cache_eeg_anphy/{args.subject}/latent_dim_{args.latent_dim}_{args.scoring_method}/epoch_{args.t_start}s_{args.t_end}s_{args.stage_label}.npz")
+        args.cache_file = Path(
+            BASE_CACHE_PATH
+            + f"/cache_eeg_test_retest_gedai/{args.subject}/{args.session}"
+            + f"/task_{args.task}_latent_dim_{args.latent_dim}_{args.scoring_method}"
+            + f"/from{args.t_start}s_to_{args.t_end}s.npz"
+        )
     cache_path = Path(args.cache_file)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # -----------------------------------------------------------------
     # Try to load from cache
-    # -----------------------------------------------------------------
     if cache_path.exists() and not args.ignore_cache:
         print(f"\n  [CACHE] Found existing cache: {cache_path}")
         print("  [CACHE] Loading latent space and metadata...")
@@ -222,9 +226,7 @@ def main() -> int:
             print("  [WARN] Cache file seems corrupted or outdated. Recomputing...")
             args.ignore_cache = True
 
-    # -----------------------------------------------------------------
     # Compute if no cache or --ignore-cache
-    # -----------------------------------------------------------------
     if not cache_path.exists() or args.ignore_cache:
         if args.ignore_cache and cache_path.exists():
             print("\n  [CACHE] --ignore-cache set. Recomputing latent space...")
@@ -242,7 +244,6 @@ def main() -> int:
             verbose=verbose,
         )
 
-        # Save to cache
         print(f"\n  [CACHE] Saving latent space to: {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache_path, latent=latent, meta=np.array(meta, dtype=object))
@@ -256,6 +257,13 @@ def main() -> int:
     print(f"  Selected ICs       : {meta['selected_indices']}")
     print(f"  Scores             : {meta['latent_scores']}")
     print(f"  Extraction time    : {meta['elapsed_time']:.1f} s")
+    
+    # Plot latent trajectory
+    plot_latent_trajectory(
+            latent,
+            out_dir=out_dir,
+            method_name=args.scoring_method,
+        )
 
     # =====================================================================
     # 3. SELECT DIMENSION(S) FOR KM ANALYSIS
@@ -271,16 +279,16 @@ def main() -> int:
         col = args.column if args.column is not None else 0
         if col >= latent_dim:
             raise ValueError(f"column ({col}) must be < latent-dim ({latent_dim})")
-        data = latent[:, col:col + 1]  # shape (n_samples, 1)
+        data = latent[:, col:col + 1]
         print(f"\n  Using latent column {col} for 1D KM analysis")
     else:
-        data = latent[:, :analysis_dim]  # shape (n_samples, analysis_dim)
+        data = latent[:, :analysis_dim]
         print(f"\n  Using first {analysis_dim} latent columns for KM analysis")
 
     D = analysis_dim
     print(f"  Data shape for KM  : {data.shape}")
 
-    # Optional: plot the latent time series
+    # Plot latent time series
     fig_ts, axes = plt.subplots(D, 1, figsize=(14, 2.5 * D), squeeze=False)
     for d in range(D):
         ax = axes[d, 0]
@@ -295,7 +303,7 @@ def main() -> int:
 
     data = outliers_cleaning(data, method="iqr", threshold=5)
 
-    # Optional: plot the latent time series after cleaning
+    # Plot cleaned
     fig_ts, axes = plt.subplots(D, 1, figsize=(14, 2.5 * D), squeeze=False)
     for d in range(D):
         ax = axes[d, 0]
@@ -313,9 +321,9 @@ def main() -> int:
     # =====================================================================
     config = CONFIGS['base_2D_model'].copy()
     config.update({
-        "model_name": f"anphy_{args.subject}_d{latent_dim}_{args.scoring_method}",
+        "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{args.scoring_method}",
         "D": D,
-        "bins": [30] * D,
+        "bins": [50] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
         "degree": 2,
@@ -347,7 +355,6 @@ def main() -> int:
     print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
     print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
 
-    # Save BW plot
     if "fig" in result_bw:
         result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
         plt.close(result_bw["fig"])
@@ -367,7 +374,7 @@ def main() -> int:
         kernel="epanechnikov",
         dt=dt,
         sigma_smooth=1.0,
-        density_threshold=0.05,
+        density_threshold=0.005,
     )
 
     print(f"\n  Drift shape    : {drift.shape}")
@@ -457,7 +464,7 @@ def main() -> int:
         return_full=True,
         degree=config["degree"],
         decompose_helmholtz=True,
-        density_threshold=0.05,
+        density_threshold=0.005,
         rtol=1e-6,
         atol=1e-12,
     )
@@ -491,8 +498,8 @@ def main() -> int:
 
         metadata = {
             "subject": args.subject,
-            "epoch_idx": args.epoch_idx,
-            "stage_label": args.stage_label,
+            "session": args.session,
+            "task": args.task,
             "t_start": args.t_start,
             "t_end": args.t_end,
             "latent_dim": latent_dim,
@@ -581,8 +588,8 @@ def main() -> int:
     print("  PIPELINE COMPLETED SUCCESSFULLY")
     print("=" * 70)
     print(f"  Subject             : {args.subject}")
-    print(f"  Epoch               : {args.epoch_idx}")
-    print(f"  Stage               : {args.stage_label}")
+    print(f"  Session             : {args.session}")
+    print(f"  Task                : {args.task}")
     print(f"  Time window         : {args.t_start:.1f}s -> {args.t_end:.1f}s")
     print(f"  Total wall-clock    : {total_time:.1f} s")
     print(f"  Output saved to     : {out_dir.absolute()}")

@@ -159,7 +159,7 @@ def main() -> int:
     out_dir = Path(
         args.out_dir
         + f"/test_retest/{args.subject}/{args.session}"
-        + f"/{args.latent_dim}_latent_dim"
+        + f"/{args.latent_dim}_latent_dim_{args.scoring_method}"
         + f"/from{args.t_start}s_to_{args.t_end}s_{args.task}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +206,7 @@ def main() -> int:
         args.cache_file = Path(
             BASE_CACHE_PATH
             + f"/cache_eeg_test_retest/{args.subject}/{args.session}"
-            + f"/task_{args.task}_latent_dim_{args.latent_dim}"
+            + f"/task_{args.task}_latent_dim_{args.latent_dim}_{args.scoring_method}"
             + f"/from{args.t_start}s_to_{args.t_end}s.npz"
         )
     cache_path = Path(args.cache_file)

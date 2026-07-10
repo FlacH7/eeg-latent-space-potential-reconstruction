@@ -10,6 +10,9 @@ load_dotenv()
 # Test-Retest Database
 DB_TEST_RETEST_PATH = os.getenv("DB_TEST_RETEST_PATH")
 
+# Test-Retest with Gedai preprocessing Database
+DB_TEST_RETEST_GEDAI_PATH = os.getenv("DB_TEST_RETEST_GEDAI_PATH")
+
 # ANPHY-Sleep Database
 DB_ANPHY_PATH = os.getenv("DB_ANPHY_PATH")
 

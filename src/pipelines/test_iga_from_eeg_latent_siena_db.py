@@ -168,7 +168,7 @@ def main() -> int:
     if args.out_dir is None:
         args.out_dir = BASE_RESULTS_PATH
         
-    out_dir = Path(args.out_dir + f"/siena/{args.patient}-{args.record}/{args.latent_dim}_latent_dim/from{args.t_start}_to_{args.t_end}_{args.period_label}")
+    out_dir = Path(args.out_dir + f"/siena/{args.patient}-{args.record}/{args.latent_dim}_latent_dim_{args.scoring_method}/from{args.t_start}_to_{args.t_end}_{args.period_label}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     overall_t0 = time.time()

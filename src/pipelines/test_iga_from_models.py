@@ -31,6 +31,8 @@ from src.potential_reconstruction.bw_optimization import optimal_bw
 from pathlib import Path
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning, augment_samples
 
+from src.plotters.trajectory_plots import plot_latent_trajectory
+
 # ---------------------------------------------------------------------------
 # GLOBAL CONFIGURATION
 # ---------------------------------------------------------------------------
@@ -54,7 +56,7 @@ T = TIME
 # ELEGIR MODELO
 # ================================================================
 models = ['single_well', 'asymmetric_double_well', 'ou', 'double_well', 'multi_stable', 'triple_well_3d', 'ring_attractor', 'stochastic_oscillator']
-model_name = models[3]  
+model_name = models[5]  
 
 config = configs[model_name]
 D = config['D']
@@ -78,6 +80,12 @@ model_info = result['model_info']
 
 print(f"\n[1] Datos simulados: {data.shape} (N={data.shape[0]}, D={D})")
 print(f"    Modelo: {model_info['name']}")
+
+plot_latent_trajectory(
+            data,
+            out_dir=out_dir,
+            method_name=f"simulated_{model_info['name']}_D{D}",
+        )
 
 #==================================================================
 # 1.5 Limpiar outliers y plotear datos simulados
@@ -292,7 +300,7 @@ if D == 2:
         align_minima=False,
         align_to_zero=False,
         crop_to_valid = True,
-        clip_percentile = 99.9,
+        # clip_percentile = 99.9,
     )
     if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
