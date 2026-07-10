@@ -180,7 +180,7 @@ def main() -> int:
     print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM EEG")
     print("=" * 70)
     
-    cache_path = Path(BASE_CACHE_PATH+f"/cache_eeg_siena/{args.patient}-{args.record}/from{args.t_start}_to_{args.t_end}_latent_dim_{args.latent_dim}.npz")
+    cache_path = Path(BASE_CACHE_PATH+f"/cache_eeg_siena/{args.patient}-{args.record}/from{args.t_start}_to_{args.t_end}_latent_dim_{args.latent_dim}_{args.scoring_method}.npz")
     # cache_path = Path(args.cache_file)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     # -----------------------------------------------------------------

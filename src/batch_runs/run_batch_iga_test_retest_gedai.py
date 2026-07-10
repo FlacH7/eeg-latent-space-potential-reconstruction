@@ -115,7 +115,7 @@ try:
         LOGGING_BASE_PATH,
         LOGGING_LEVEL,
     )
-    from src.post_processing.asymmetry_plotter import run_full_postprocessing
+    from src.post_processing.run_postprocessing import run_postprocessing
 except ImportError as _exc:  # pragma: no cover
     print(
         f"[ERROR] No se pudieron importar los módulos del proyecto. "
@@ -509,7 +509,8 @@ class BatchRunnerTestRetestGedai:
         logger.info("=" * 70)
         try:
             postprocess_dir = OUTPUT_DIR / "postprocess_asymmetry_gedai"
-            run_full_postprocessing(
+            run_postprocessing(
+                db_name="test_retest_gedai",
                 root_dir=OUTPUT_DIR,
                 output_dir=postprocess_dir,
             )

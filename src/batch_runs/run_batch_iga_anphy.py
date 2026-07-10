@@ -121,7 +121,7 @@ try:
         LOGGING_BASE_PATH,
         LOGGING_LEVEL,
     )
-    from src.post_processing.asymmetry_plotter import run_full_postprocessing
+    from src.post_processing.run_postprocessing import run_postprocessing
 except ImportError as _exc:  # pragma: no cover
     # Fallback amigable si se ejecuta sin el entorno del proyecto configurado
     print(
