@@ -195,7 +195,7 @@ L_FREQ: float = _env_float("TEST_RETEST_GEDAI_L_FREQ", 1.0)
 H_FREQ: float = _env_float("TEST_RETEST_GEDAI_H_FREQ", 40.0)
 
 CHECKPOINT_FILE: Path = CACHE_DIR / _env(
-    "TEST_RETEST_GEDAI_CHECKPOINT_FILENAME", f"batch_checkpoint_test_retest_gedai{SCORING_METHOD}.json"
+    "TEST_RETEST_GEDAI_CHECKPOINT_FILENAME", f"batch_checkpoint_test_retest_gedai_{SCORING_METHOD}.json"
 )
 
 PIPELINE_MODULE: str = "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai"
