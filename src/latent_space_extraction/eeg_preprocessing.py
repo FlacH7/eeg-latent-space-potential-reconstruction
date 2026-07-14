@@ -395,6 +395,59 @@ def extract_clean_components(
 
 
 # ---------------------------------------------------------------------------
+# Filtered Data Matrix Extraction (Hankel+DMD bypass — no ICA)
+# ---------------------------------------------------------------------------
+
+def extract_filtered_data_matrix(
+    raw: mne.io.Raw,
+    *,
+    l_freq: float = DEFAULT_L_FREQ,
+    h_freq: float = DEFAULT_H_FREQ,
+    verbose: bool | str | None = None,
+) -> tuple[np.ndarray, mne.io.Raw, float]:
+    """
+    Apply band-pass filtering and return the data as a NumPy matrix.
+
+    This is a **lightweight Stage-I** used when the downstream latent-space
+    extractor (e.g. Hankel+DMD) does **not** require ICA decomposition or
+    ICLabel artifact rejection.  Only filtering is applied.
+
+    Parameters
+    ----------
+    raw : mne.io.Raw
+        Raw EEG recording (channels should already be restricted to EEG+EOG).
+    l_freq : float, default 1.0
+        High-pass cutoff (Hz).
+    h_freq : float, default 40.0
+        Low-pass cutoff (Hz).
+    verbose : bool | str | None, optional
+        MNE verbosity level.
+
+    Returns
+    -------
+    X : np.ndarray, shape (n_channels, n_times)
+        Filtered data matrix (channels x time samples).  Each row is
+        centered to zero mean.
+    raw_filtered : mne.io.Raw
+        The filtered MNE Raw object (useful for accessing ``raw.info``).
+    sfreq : float
+        Sampling frequency in Hz.
+    """
+    raw_filtered = apply_bandpass_filter(
+        raw, l_freq=l_freq, h_freq=h_freq, verbose=verbose
+    )
+
+    X = raw_filtered.get_data()  # shape (n_channels, n_times)
+
+    # Center each channel (zero mean per row) — consistent with ICA path
+    X = X - X.mean(axis=1, keepdims=True)
+
+    sfreq = raw_filtered.info["sfreq"]
+
+    return X, raw_filtered, sfreq
+
+
+# ---------------------------------------------------------------------------
 # Full Stage-I Pipeline (convenience)
 # ---------------------------------------------------------------------------
 

@@ -101,10 +101,10 @@ def _parse_args() -> argparse.Namespace:
     # ---- Latent-space extraction params ----
     parser.add_argument("--latent-dim", type=int, default=2,
                         help="Dimensionality of the latent subspace (default: 2)")
-    parser.add_argument("--scoring-method", type=str, default="markov",
+    parser.add_argument("--scoring-method", type=str, default="hankel_dmd",
                         choices=["markov", "conservative", "weighted",
-                                 "sequential", "pareto", "independent"],
-                        help="Subspace selection strategy (default: markov)")
+                                 "sequential", "pareto", "independent", "hankel_dmd"],
+                        help="Subspace selection strategy (default: hankel_dmd)")
     parser.add_argument("--fc-metric", type=str, default="variance_sum",
                         choices=["variance_sum", "first_pc_var", "total_variance"])
     parser.add_argument("--n-bins", type=int, default=10,

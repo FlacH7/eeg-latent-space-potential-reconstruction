@@ -7,6 +7,10 @@ Single-call function that runs the complete pipeline:
     → subspace selection (Markov / Conservative / Weighted / Sequential / Pareto)
     → latent space as np.ndarray (n_samples, n_dim)
 
+**New:** Hankel+DMD mode (``scoring_method="hankel_dmd"``) bypasses ICA
+entirely and extracts the latent space via delay embedding + Dynamic
+Mode Decomposition.
+
 Typical usage::
 
     from extract_latent_subspace import extract_latent_space
@@ -31,11 +35,21 @@ Typical usage::
         n_bins=5,
     )
 
+    # Hankel+DMD (no ICA/ICLabel)
+    latent, meta = extract_latent_space(
+        raw,
+        n_dim=4,
+        scoring_method="hankel_dmd",
+        hankel_embedding_depth=60,
+    )
+
 Return value
 ------------
 latent : np.ndarray, shape (n_samples, n_dim)
     The extracted latent subspace, one column per latent dimension.
     Time runs along the rows (same axis as the original time series).
+    **Note:** for ``hankel_dmd``, ``n_samples = original_n_times - T + 1``
+    due to the delay embedding.
 
 meta : dict
     Metadata including the selected component indices, scores, timing,
@@ -53,6 +67,7 @@ import numpy as np
 
 #Preprocessing
 from src.latent_space_extraction.eeg_preprocessing import (
+    extract_filtered_data_matrix,
     load_raw_eeg,
     load_sample_mne_data,
     run_full_preprocessing,
@@ -80,6 +95,11 @@ from src.latent_space_extraction.scoring import (
     weighted_score_selection,
 )
 
+# Hankel+DMD latent extractor
+from src.latent_space_extraction.hankel_dmd_extractor import (
+    extract_hankel_dmd_latent_space,
+)
+
 
 # ---------------------------------------------------------------------------
 # Default constants
@@ -104,7 +124,8 @@ def extract_latent_space(
     n_dim: int = 2,
     # ---- Scoring method ----
     scoring_method: Literal[
-        "markov", "conservative", "weighted", "sequential", "pareto", "independent"
+        "markov", "conservative", "weighted", "sequential", "pareto",
+        "independent", "hankel_dmd",
     ] = "markov",
     # ---- Conservative-fraction params ----
     fc_metric: str = DEFAULT_FC_METRIC,
@@ -115,6 +136,8 @@ def extract_latent_space(
     # ---- Sequential strategy params ----
     primary_criterion: Literal["fc", "markov"] = "markov",
     sequential_K: int | None = None,
+    # ---- Hankel+DMD params ----
+    hankel_embedding_depth: int | None = None,
     # ---- Preprocessing params ----
     l_freq: float = DEFAULT_L_FREQ,
     h_freq: float = DEFAULT_H_FREQ,
@@ -152,6 +175,12 @@ def extract_latent_space(
           for downstream multi-objective analysis).
         * ``"independent"``  — run both criteria independently and return
           the Markov winner (discards the FC winner).
+        * ``"hankel_dmd"``   — **Hankel delay embedding + DMD**.  Bypasses
+          ICA/ICLabel entirely.  Applies only band-pass filtering, then
+          builds a block-Hankel matrix from delay embeddings and extracts
+          the latent space via truncated SVD + DMD.  The ``n_dim``
+          parameter controls the number of retained DMD modes (latent
+          rank).  Additional params: *hankel_embedding_depth*.
 
     fc_metric : str, default ``"variance_sum"``
         Variance measure for the conservative fraction. One of:
@@ -167,21 +196,31 @@ def extract_latent_space(
     sequential_K : int or None, optional
         Number of candidates to retain in the first filtering stage of
         sequential strategy. ``None`` auto-computes ``min(20, 5% of combos)``.
+    hankel_embedding_depth : int or None, optional
+        **Only used when** ``scoring_method="hankel_dmd"``.  Embedding
+        depth (*T*) for the Hankel matrix — number of past snapshots in
+        the delay vector.  ``None`` auto-computes from the sampling rate
+        (rule of thumb: ``T = clip(sfreq * 0.25, 50, 200)``).
     l_freq : float, default 1.0
         High-pass filter cutoff (Hz).
     h_freq : float, default 40.0
         Low-pass filter cutoff (Hz).
     n_components : int | float | None, optional
         Number of ICA components. ``None`` = ``n_channels - 1``.
+        **Ignored when** ``scoring_method="hankel_dmd"``.
     ica_method : str, default ``"picard"``
         ICA algorithm (``"picard"``, ``"fastica"``, ``"infomax"``).
+        **Ignored when** ``scoring_method="hankel_dmd"``.
     ica_random_state : int | None, default 42
         Random seed for ICA reproducibility.
+        **Ignored when** ``scoring_method="hankel_dmd"``.
     retained_labels : list of str, optional
         ICLabel classes to keep. Defaults to ``["brain", "other"]``.
+        **Ignored when** ``scoring_method="hankel_dmd"``.
     search_strategy : ``"exhaustive"`` | ``"greedy"``, default ``"exhaustive"``
         Combinatorial search strategy. Use ``"greedy"`` when
         ``n_dim >= 4`` or for faster approximate results.
+        **Ignored when** ``scoring_method="hankel_dmd"``.
     n_workers : int or None, optional
         Number of parallel processes. ``None`` uses all CPU cores.
     verbose : bool | str | None, optional
@@ -192,6 +231,10 @@ def extract_latent_space(
     latent : np.ndarray, shape (n_samples, n_dim)
         The extracted latent subspace. Each column is one latent
         dimension (component time series). Ready for downstream analyses.
+
+        **Special case — Hankel+DMD:** ``n_samples = n_times - T + 1``
+        (shorter than the original recording due to the delay embedding
+        window).
     meta : dict
         Dictionary with keys:
 
@@ -199,6 +242,7 @@ def extract_latent_space(
           matrix that form the latent subspace.
         * ``"scoring_method"``      — which strategy was used.
         * ``"latent_scores"``       — criterion values (fc, tau, etc.).
+          For ``hankel_dmd``, contains DMD frequencies and damping rates.
         * ``"preprocessing"``       — Stage-I info (D, T, sfreq,
           excluded indices, label counts).
         * ``"elapsed_time"``        — total wall-clock time in seconds.
@@ -208,13 +252,30 @@ def extract_latent_space(
     t0 = time.time()
 
     # =====================================================================
-    # Stage I — Preprocessing
+    # Load raw if a path was given
     # =====================================================================
     if isinstance(raw_input, (str, Path)):
         raw = load_raw_eeg(str(raw_input), verbose=verbose)
     else:
         raw = raw_input
 
+    # =====================================================================
+    # Hankel+DMD branch — bypasses ICA/ICLabel entirely
+    # =====================================================================
+    if scoring_method == "hankel_dmd":
+        return _extract_hankel_dmd_branch(
+            raw=raw,
+            n_dim=n_dim,
+            hankel_embedding_depth=hankel_embedding_depth,
+            l_freq=l_freq,
+            h_freq=h_freq,
+            verbose=verbose,
+            t0=t0,
+        )
+
+    # =====================================================================
+    # Standard branch — Stage I: Preprocessing (filter → ICA → ICLabel)
+    # =====================================================================
     if retained_labels is None:
         retained_labels = ["brain", "other"]
 
@@ -278,7 +339,7 @@ def extract_latent_space(
     # =====================================================================
     # Build latent space: transpose to (n_samples, n_dim)
     # =====================================================================
-    latent = Y[list(selected_idx), :].T  # (T, N) → (n_samples, n_dim)
+    latent = Y[list(selected_idx), :].T  # (T, N) -> (n_samples, n_dim)
 
     elapsed = time.time() - t0
 
@@ -301,6 +362,60 @@ def extract_latent_space(
     }
 
     return latent, meta
+
+
+# ---------------------------------------------------------------------------
+# Hankel+DMD branch (bypasses ICA / ICLabel / combinatorial selection)
+# ---------------------------------------------------------------------------
+
+def _extract_hankel_dmd_branch(
+    raw: mne.io.Raw,
+    *,
+    n_dim: int,
+    hankel_embedding_depth: int | None,
+    l_freq: float,
+    h_freq: float,
+    verbose: bool | str | None,
+    t0: float,
+) -> tuple[np.ndarray, dict]:
+    """
+    Execute the Hankel+DMD branch of the pipeline.
+
+    This bypasses ICA decomposition and ICLabel artifact rejection.
+    Only band-pass filtering is applied, then the Hankel+DMD module
+    extracts the latent space directly.
+    """
+    print(f"\n[Hankel-DMD] Bypassing ICA/ICLabel — using delay-embedding DMD")
+    print(f"[Hankel-DMD] Filter: {l_freq}-{h_freq} Hz | n_dim={n_dim}")
+
+    # 1. Apply only band-pass filtering, get data matrix
+    X, raw_filtered, sfreq = extract_filtered_data_matrix(
+        raw,
+        l_freq=l_freq,
+        h_freq=h_freq,
+        verbose=verbose,
+    )
+
+    n_ch, n_times = X.shape
+    print(f"[Hankel-DMD] Channels: {n_ch} | Time samples: {n_times} | sfreq: {sfreq:.1f} Hz")
+
+    # 2. Run Hankel+DMD to get latent space directly
+    latent, meta_hankel = extract_hankel_dmd_latent_space(
+        X,
+        n_dim=n_dim,
+        embedding_depth=hankel_embedding_depth,
+        sfreq=sfreq,
+    )
+
+    elapsed = time.time() - t0
+    meta_hankel["elapsed_time"] = elapsed
+
+    print(f"[Hankel-DMD] Latent shape: {latent.shape}")
+    print(f"[Hankel-DMD] Singular values: {meta_hankel['preprocessing']['singular_values']}")
+    print(f"[Hankel-DMD] DMD frequencies [Hz]: "
+          f"{[f'{f:.3f}' for f in meta_hankel['latent_scores']['frequencies_hz']]}")
+
+    return latent, meta_hankel
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +768,7 @@ def diagnose_subspace_discrimination(
 
         verdict = "YES" if discriminates else "NO"
         print(f"\n  Metric: {metric}")
-        print(f"    Range  : {vmin:.6f} → {vmax:.6f} (span = {vrange:.6f})")
+        print(f"    Range  : {vmin:.6f} -> {vmax:.6f} (span = {vrange:.6f})")
         print(f"    Mean   : {vmean:.6f}")
         print(f"    Std    : {vstd:.6f}")
         print(f"    CV     : {cv:.4f}")
@@ -707,7 +822,7 @@ def diagnose_subspace_discrimination(
 
     verdict_tau = "YES" if discriminates_tau else "NO"
     print(f"\n  Metric: Markov relaxation time (n_bins={n_bins})")
-    print(f"    Range    : {vmin_tau:.6f} → {vmax_tau:.6f} (span = {vrange_tau:.6f})")
+    print(f"    Range    : {vmin_tau:.6f} -> {vmax_tau:.6f} (span = {vrange_tau:.6f})")
     print(f"    Mean     : {vmean_tau:.6f}")
     print(f"    Std      : {vstd_tau:.6f}")
     print(f"    CV       : {cv_tau:.4f}")
@@ -748,7 +863,7 @@ def diagnose_subspace_discrimination(
     elif discriminates_tau and fc_discriminates_any:
         method = "weighted"
         rationale = (
-            "Both criteria discriminate. Use 'weighted' with alpha≈0.5 "
+            "Both criteria discriminate. Use 'weighted' with alpha=0.5 "
             "to balance variance retention and dynamical speed, "
             "or 'pareto' to explore the trade-off frontier."
         )
@@ -789,12 +904,15 @@ if __name__ == "__main__":
                         help="Target dimensionality (default: 2)")
     parser.add_argument("--method", type=str, default="markov",
                         choices=["markov", "conservative", "weighted",
-                                 "sequential", "pareto", "independent"],
+                                 "sequential", "pareto", "independent",
+                                 "hankel_dmd"],
                         help="Scoring method (default: markov)")
     parser.add_argument("--fc-metric", type=str, default="variance_sum",
                         choices=["variance_sum", "first_pc_var", "total_variance"])
     parser.add_argument("--n-bins", type=int, default=5)
     parser.add_argument("--alpha", type=float, default=None)
+    parser.add_argument("--hankel-embedding-depth", type=int, default=None,
+                        help="Hankel embedding depth T (only for hankel_dmd method)")
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--greedy", action="store_true")
 
@@ -808,8 +926,9 @@ if __name__ == "__main__":
     search = "greedy" if args.greedy else "exhaustive"
 
     print(f"Extracting {args.n_dim}-D latent space using '{args.method}'...")
-    latent, meta = extract_latent_space(
-        raw_input,
+
+    # Build kwargs dynamically (hankel_dmd ignores some params)
+    kwargs = dict(
         n_dim=args.n_dim,
         scoring_method=args.method,
         fc_metric=args.fc_metric,
@@ -818,6 +937,15 @@ if __name__ == "__main__":
         search_strategy=search,
         n_workers=args.workers,
     )
+    if args.method == "hankel_dmd":
+        kwargs["hankel_embedding_depth"] = args.hankel_embedding_depth
+        # Remove ICA-irrelevant params for clarity
+        kwargs.pop("fc_metric", None)
+        kwargs.pop("n_bins", None)
+        kwargs.pop("alpha", None)
+        kwargs.pop("search_strategy", None)
+
+    latent, meta = extract_latent_space(raw_input, **kwargs)
 
     print(f"\nLatent space shape: {latent.shape}")
     print(f"Selected components: {meta['selected_indices']}")
