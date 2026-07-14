@@ -188,9 +188,6 @@ ANPHY_DB_PATH: Path = Path(_env("ANPHY_DB_PATH", DB_ANPHY_PATH + "/osfstorage"))
 OUTPUT_DIR: Path = Path(_env("ANPHY_OUTPUT_DIR", BASE_RESULTS_PATH))
 CACHE_DIR: Path = Path(_env("ANPHY_CACHE_DIR", BASE_CACHE_PATH))
 
-# El checkpoint vive dentro del directorio de caché
-CHECKPOINT_FILE: Path = CACHE_DIR / _env("ANPHY_CHECKPOINT_FILENAME", "batch_checkpoint_anphy.json")
-
 DELAY: float = _env_float("ANPHY_DELAY", 2.0)
 IGNORE_CACHE: bool = _env_bool("ANPHY_IGNORE_CACHE", False)
 RUN_POSTPROCESS: bool = _env_bool("ANPHY_RUN_POSTPROCESS", True)
@@ -201,6 +198,10 @@ SCORING_METHOD: str = _env("ANPHY_SCORING_METHOD", "markov")
 ICA_METHOD: str = _env("ANPHY_ICA_METHOD", "picard")
 L_FREQ: float = _env_float("ANPHY_L_FREQ", 1.0)
 H_FREQ: float = _env_float("ANPHY_H_FREQ", 40.0)
+
+CHECKPOINT_FILE: Path = CACHE_DIR / _env(
+    "ANPHY_CHECKPOINT_FILENAME", f"batch_checkpoint_anphy_{SCORING_METHOD}.json"
+)
 
 # Ruta al script del pipeline (relativa a este archivo)
 PIPELINE_MODULE: Path = "src.pipelines.test_iga_from_eeg_latent_anphy"
@@ -503,7 +504,8 @@ class BatchRunnerAnphy:
         logger.info("=" * 70)
         try:
             postprocess_dir = OUTPUT_DIR / "postprocess_asymmetry"
-            run_full_postprocessing(
+            run_postprocessing(
+                db_name = "anphy",
                 root_dir=OUTPUT_DIR,
                 output_dir=postprocess_dir,
             )

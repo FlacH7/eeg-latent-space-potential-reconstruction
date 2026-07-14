@@ -182,8 +182,6 @@ SIENA_DB_PATH: Path = Path(_env("SIENA_DB_PATH", DB_SIENA_PATH))
 OUTPUT_DIR: Path = Path(_env("SIENA_OUTPUT_DIR", BASE_RESULTS_PATH))
 CACHE_DIR: Path = Path(_env("SIENA_CACHE_DIR", BASE_CACHE_PATH))
 
-CHECKPOINT_FILE: Path = CACHE_DIR / _env("SIENA_CHECKPOINT_FILENAME", "batch_checkpoint_siena.json")
-
 DELAY: float = _env_float("SIENA_DELAY", 2.0)
 IGNORE_CACHE: bool = _env_bool("SIENA_IGNORE_CACHE", False)
 RUN_POSTPROCESS: bool = _env_bool("SIENA_RUN_POSTPROCESS", True)
@@ -194,6 +192,10 @@ SCORING_METHOD: str = _env("SIENA_SCORING_METHOD", "markov")
 ICA_METHOD: str = _env("SIENA_ICA_METHOD", "picard")
 L_FREQ: float = _env_float("SIENA_L_FREQ", 1.0)
 H_FREQ: float = _env_float("SIENA_H_FREQ", 40.0)
+
+CHECKPOINT_FILE: Path = CACHE_DIR / _env(
+    "SIENA_CHECKPOINT_FILENAME", f"batch_checkpoint_siena_{SCORING_METHOD}.json"
+)
 
 PIPELINE_MODULE: str = "src.pipelines.test_iga_from_eeg_latent_siena_db"
 _PIPELINE_OUT_SUBPATH = "siena"

@@ -183,10 +183,6 @@ TEST_RETEST_DB_PATH: Path = Path(_env("TEST_RETEST_DB_PATH", DB_TEST_RETEST_PATH
 OUTPUT_DIR: Path = Path(_env("TEST_RETEST_OUTPUT_DIR", BASE_RESULTS_PATH))
 CACHE_DIR: Path = Path(_env("TEST_RETEST_CACHE_DIR", BASE_CACHE_PATH))
 
-CHECKPOINT_FILE: Path = CACHE_DIR / _env(
-    "TEST_RETEST_CHECKPOINT_FILENAME", "batch_checkpoint_test_retest.json"
-)
-
 DELAY: float = _env_float("TEST_RETEST_DELAY", 2.0)
 IGNORE_CACHE: bool = _env_bool("TEST_RETEST_IGNORE_CACHE", False)
 RUN_POSTPROCESS: bool = _env_bool("TEST_RETEST_RUN_POSTPROCESS", True)
@@ -197,6 +193,10 @@ SCORING_METHOD: str = _env("TEST_RETEST_SCORING_METHOD", "markov")
 ICA_METHOD: str = _env("TEST_RETEST_ICA_METHOD", "picard")
 L_FREQ: float = _env_float("TEST_RETEST_L_FREQ", 1.0)
 H_FREQ: float = _env_float("TEST_RETEST_H_FREQ", 40.0)
+
+CHECKPOINT_FILE: Path = CACHE_DIR / _env(
+    "TEST_RETEST_CHECKPOINT_FILENAME", f"batch_checkpoint_test_retest_{SCORING_METHOD}.json"
+)
 
 PIPELINE_MODULE: str = "src.pipelines.test_iga_from_eeg_latent_test_retest"
 _PIPELINE_OUT_SUBPATH = "test_retest"
