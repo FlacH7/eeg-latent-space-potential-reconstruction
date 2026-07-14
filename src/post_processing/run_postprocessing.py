@@ -110,6 +110,8 @@ def collect_asymmetry_data(
     label_field: str,
     known_labels: list[str] | None = None,
     subject_filter: str | None = None,
+    latent_dim: int | None = None,
+    scoring_method: str | None = None,
 ) -> dict:
     """
     Recolecta métricas de asimetría para todos los potenciales bajo root_dir.
@@ -126,13 +128,20 @@ def collect_asymmetry_data(
         Labels conocidos para validación.
     subject_filter : str | None
         Si se proporciona, solo procesa archivos de ese sujeto.
-
+    latent_dim : int | None
+    scoring_method : str | None
     Returns
     -------
     dict : {(subject, label): [lista de listas de métricas por epoch]}
     """
     root_dir = Path(root_dir)
     files = find_potential_files(root_dir)
+
+    # --- FILTRO POR CONFIGURACIÓN DE CARPETAS ---
+    if latent_dim is not None:
+        files = [f for f in files if f"{latent_dim}_latent_dim" in str(f)]
+    if scoring_method is not None:
+        files = [f for f in files if f"{scoring_method}" in str(f)]
 
     if subject_filter:
         files = [f for f in files if subject_filter in str(f)]
@@ -677,6 +686,8 @@ def run_postprocessing(
     root_dir: str | Path | None = None,
     output_dir: str | Path | None = None,
     subject_filter: str | None = None,
+    latent_dim: int | None = None,
+    scoring_method: str | None = None,
 ) -> None:
     """
     Ejecuta el post-procesamiento completo para una base de datos.
@@ -733,6 +744,8 @@ def run_postprocessing(
         label_field=cfg["label_field"],
         known_labels=cfg.get("known_labels"),
         subject_filter=subject_filter,
+        latent_dim=latent_dim,
+        scoring_method=scoring_method
     )
 
     if not results:
@@ -822,6 +835,13 @@ Ejemplos:
         "--subject", type=str, default=None,
         help="Filtrar por sujeto específico",
     )
+    
+    parser.add_argument("--latent-dim", type=int, default=None,
+                    help="Filtrar por latent_dim (ej: 2)")
+    
+    parser.add_argument("--scoring-method", type=str, default=None,
+                    help="Filtrar por scoring_method (ej: hankel_dmd)")
+    
     args = parser.parse_args()
 
     run_postprocessing(
@@ -829,6 +849,8 @@ Ejemplos:
         root_dir=args.root_dir,
         output_dir=args.out_dir,
         subject_filter=args.subject,
+        latent_dim=args.latent_dim,
+        scoring_method=args.scoring_method,
     )
 
 

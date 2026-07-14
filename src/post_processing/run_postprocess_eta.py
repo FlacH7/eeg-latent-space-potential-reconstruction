@@ -228,11 +228,22 @@ def filter_outlier_epochs(label_data, mad_threshold=5.0, eta_max=2.0,
 # RECOLECCIÓN POR LABEL
 # =============================================================================
 
-def collect_eta_by_label(root_dir, subject_field, label_field, db_name=None):
+def collect_eta_by_label(root_dir,
+                         subject_field,
+                         label_field,
+                         db_name=None,
+                         latent_dim=None,
+                         scoring_method=None):
     """
     Recorre ``potential_data.npz`` bajo *root_dir* y agrupa por label.
     """
     files = find_potential_files(root_dir)
+
+    # --- FILTRO POR CONFIGURACIÓN DE CARPETAS ---
+    if latent_dim is not None:
+        files = [f for f in files if f"{latent_dim}_latent_dim" in str(f)]
+    if scoring_method is not None:
+        files = [f for f in files if f"{scoring_method}" in str(f)]
     by_label = defaultdict(list)
 
     for f in files:
@@ -580,9 +591,14 @@ def plot_label_average(label, avg_data, output_dir):
 # ORQUESTACIÓN PRINCIPAL
 # =============================================================================
 
-def run_eta_postprocessing(db_name, root_dir=None, output_dir=None,
-                           mad_threshold=5.0, eta_max=2.0,
-                           min_valid_fraction=0.2):
+def run_eta_postprocessing(db_name,
+                           root_dir=None,
+                           output_dir=None,
+                           mad_threshold=5.0,
+                           eta_max=2.0,
+                           min_valid_fraction=0.2,
+                           latent_dim=None,
+                           scoring_method=None):
     """
     Ejecuta el post-procesamiento completo de η para una base de datos.
     """
@@ -621,6 +637,8 @@ def run_eta_postprocessing(db_name, root_dir=None, output_dir=None,
         cfg["subject_field"],
         cfg["label_field"],
         db_name=db_name,
+        latent_dim=latent_dim,
+        scoring_method=scoring_method
     )
 
     if not by_label:
@@ -727,6 +745,20 @@ Ejemplos:
         default=0.2,
         help="Fracción mínima de celdas válidas por época (default: 0.2)",
     )
+    parser.add_argument(
+        "--latent-dim",
+        type=int, 
+        default=None,
+        help="Filtrar por latent_dim"
+    )
+    
+    parser.add_argument(
+        "--scoring-method", 
+        type=str, 
+        default=None,
+        help="Filtrar por scoring_method"
+    )
+    
     args = parser.parse_args()
 
     run_eta_postprocessing(
@@ -736,6 +768,8 @@ Ejemplos:
         mad_threshold=args.mad_threshold,
         eta_max=args.eta_max,
         min_valid_fraction=args.min_valid_fraction,
+        latent_dim=args.latent_dim,
+        scoring_method=args.scoring_method
     )
 
 
