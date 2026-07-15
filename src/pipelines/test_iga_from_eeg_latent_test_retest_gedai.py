@@ -59,6 +59,8 @@ from src.latent_space_extraction.test_retest_gedai_eeg import load_test_retest_g
 
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
 
+from src.latent_space_extraction.ck_test import chapman_kolmogorov_test
+
 from src.utils.io import save_potential
 
 from src.plotters.trajectory_plots import plot_latent_trajectory
@@ -284,6 +286,26 @@ def main() -> int:
     else:
         data = latent[:, :analysis_dim]
         print(f"\n  Using first {analysis_dim} latent columns for KM analysis")
+        
+    ck_result = chapman_kolmogorov_test(
+    data,
+    dt=dt,
+    n_bins=20,
+    threshold=0.15,
+    plot=True,
+    out_dir=out_dir,
+    verbose=True,
+)
+
+    if not ck_result["is_markovian"]:
+        print("\n  [WARN] Latent space is NOT Markovian. KM results may be invalid.")
+        print("  Consider: increasing latent_dim, increasing embedding_depth,")
+        print("  or switching to a different scoring method.")
+    else:
+        print(f"\n  [OK] Markovian at tau* = {ck_result['tau_star']:.4f} s "
+            f"({ck_result['tau_star_idx']} steps)")
+        # Opcional: usar tau* como lag para KM
+        # km_lag = ck_result["tau_star"]
 
     D = analysis_dim
     print(f"  Data shape for KM  : {data.shape}")
