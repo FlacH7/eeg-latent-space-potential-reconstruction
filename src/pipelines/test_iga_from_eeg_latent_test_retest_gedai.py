@@ -464,7 +464,7 @@ def main() -> int:
         return_full=True,
         degree=config["degree"],
         decompose_helmholtz=True,
-        density_threshold=0.02,
+        density_threshold=0.05,
         rtol=1e-6,
         atol=1e-12,
     )
