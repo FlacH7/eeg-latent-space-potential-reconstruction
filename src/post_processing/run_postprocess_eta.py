@@ -320,8 +320,9 @@ def compute_label_averages(label_data, ref_edges=None, mad_threshold=5.0,
     # 2. Elegir grilla de referencia (la más común entre las sanas)
     if ref_edges is None:
         shapes = [tuple(len(e) for e in d["edges"]) for d in kept]
-        unique, counts = np.unique(shapes, return_counts=True)
-        most_common = unique[np.argmax(counts)]
+        from collections import Counter
+        shape_counts = Counter(shapes)
+        most_common = shape_counts.most_common(1)[0][0]  # ya es un tuple
         for d in kept:
             if tuple(len(e) for e in d["edges"]) == most_common:
                 ref_edges = d["edges"]
@@ -742,7 +743,7 @@ Ejemplos:
     parser.add_argument(
         "--min-valid-fraction",
         type=float,
-        default=0.2,
+        default=0.05,
         help="Fracción mínima de celdas válidas por época (default: 0.2)",
     )
     parser.add_argument(
