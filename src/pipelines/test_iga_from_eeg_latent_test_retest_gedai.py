@@ -323,7 +323,7 @@ def main() -> int:
     config.update({
         "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{args.scoring_method}",
         "D": D,
-        "bins": [30] * D,
+        "bins": [25] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
         "degree": 2,
@@ -374,7 +374,7 @@ def main() -> int:
         kernel="epanechnikov",
         dt=dt,
         sigma_smooth=1.0,
-        density_threshold=0.02,
+        density_threshold=0.03,
     )
 
     print(f"\n  Drift shape    : {drift.shape}")
