@@ -311,7 +311,7 @@ if D == 2:
         stream_function=result_iga.get('stream_function'),        # NUEVO
         reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
         reconstructed_drift=result_iga.get('reconstructed_drift'),  # NUEVO
-        # clip_percentile = 99.9,
+        clip_percentile = 99.9,
     )
     if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -361,6 +361,7 @@ if D == 2:
             reconstructed_drift=result_iga.get('reconstructed_drift'),
             title=f'{model_name.upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)',
             crop_to_valid=True,
+            clip_percentile=99.9,
             skip=4
         )
         fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)

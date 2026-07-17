@@ -2276,7 +2276,8 @@ def plot_potential_combined_2d(U, edges, stream_function=None,
                                scale=None, width=0.004,
                                stream_color='white', stream_density=1.5,
                                psi_levels=10, figsize=(9, 8),
-                               crop_to_valid=False):
+                               crop_to_valid=False,
+                               clip_percentile=None):
     """
     Plot combinado del mecanismo físico completo (un solo panel).
 
@@ -2339,11 +2340,22 @@ def plot_potential_combined_2d(U, edges, stream_function=None,
         if g1 is not None:
             g1 = g1[x0:x1, y0:y1]
             g2 = g2[x0:x1, y0:y1]
+    
+    if clip_percentile is not None:
+        valid_data = U_plot[~np.isnan(U_plot)]
+        if len(valid_data) > 0:
+            vmin = np.percentile(valid_data, 100 - clip_percentile)
+            vmax = np.percentile(valid_data, clip_percentile)
+            levels = np.linspace(vmin, vmax, levels)
+        else:
+            vmin = None; vmax = None; levels = levels
+    else:
+        vmin = None; vmax = None; levels = levels
 
     X, Y = np.meshgrid(edges_plot[0], edges_plot[1], indexing='ij')
 
     fig, ax = plt.subplots(figsize=figsize)
-    im = ax.contourf(X, Y, U_plot, levels=levels, cmap=cmap, alpha=0.7)
+    im = ax.contourf(X, Y, U_plot, levels=levels, cmap=cmap, alpha=0.7, vmin=vmin, vmax=vmax)
 
     # Isolíneas de ψ (opcional, en gris)
     if psi_plot is not None and psi_plot.shape == X.shape and np.any(~np.isnan(psi_plot)):
