@@ -475,6 +475,44 @@ class BSplineTensorSpace:
 
         return K, F, {'strides': strides, 'w_vol': w_vol}
 
+    def assemble_galerkin_system_psi(self, g_field, density, density_mask=None,
+                                     weights=None):
+        """
+        Ensambla K (idéntica a la de U) y el vector de carga F_psi para la
+        función de corriente ψ (solo D == 2).
+
+        La única diferencia respecto a assemble_galerkin_system es el vector
+        de carga: en vez de proyectar g sobre ∇N_i se proyecta sobre
+        ∇⊥N_i = (-∂N_i/∂y, ∂N_i/∂x), lo que equivale a alimentar el
+        ensamblador estándar con el campo permutado g_perp = (g2, -g1):
+
+            F_psi[j] = ∫ w(x) [ g1·(-∂N_j/∂y) + g2·(∂N_j/∂x) ] dV
+
+        Parameters
+        ----------
+        g_field : ndarray (2, n1, n2)
+        density : ndarray (n1, n2)
+        density_mask : bool ndarray, optional
+        weights : ndarray, optional
+
+        Returns
+        -------
+        K : scipy.sparse.csr_matrix
+            Idéntica a la de assemble_galerkin_system.
+        F_psi : ndarray
+        info : dict
+        """
+        if self.D != 2:
+            raise ValueError(
+                f"assemble_galerkin_system_psi solo está definido en 2D (D={self.D})"
+            )
+        g_perp = np.stack([np.asarray(g_field[1], dtype=float),
+                           -np.asarray(g_field[0], dtype=float)], axis=0)
+        return self.assemble_galerkin_system(
+            g_perp, density, density_mask=density_mask,
+            lambda_reg=0.0, weights=weights
+        )
+
 
 # =============================================================================
 # PUNTO DE DOLOR 1: Descomposición de Helmholtz explícita
@@ -515,6 +553,171 @@ def compute_helmholtz_residual(g_field, coeffs, bspline_space,
 
 
 # =============================================================================
+# FUNCIÓN DE CORRIENTE ψ (Helmholtz desacoplado 2D)
+# =============================================================================
+
+def compute_stream_function(bspline_space, g_field, density, density_mask=None,
+                            solver='auto', dirichlet_penalty=1e12):
+    """
+    Resuelve -∇²ψ = -∇×g para obtener la función de corriente ψ.
+
+    Usa exactamente la misma matriz de rigidez K que para U; solo cambia el
+    vector de carga F → F_psi (proyección de g sobre ∇⊥N_i). Aplica la
+    condición de Dirichlet homogénea ψ = 0 en ∂Ω penalizando fuertemente
+    todos los DOFs de funciones base con soporte en la frontera (para
+    vectores de nodos abiertos: índice 0 o n_bases-1 en alguna dirección).
+
+    Parameters
+    ----------
+    bspline_space : BSplineTensorSpace
+    g_field : ndarray (2, n1, n2)
+    density : ndarray (n1, n2)
+    density_mask : bool ndarray, optional
+    solver : str
+        'auto', 'direct', 'cg'.
+    dirichlet_penalty : float
+        Penalización para la condición de Dirichlet homogénea en el borde.
+
+    Returns
+    -------
+    psi : ndarray (n1, n2)
+    coeffs_psi : ndarray (N_dof,)
+    info : dict
+    """
+    if bspline_space.D != 2:
+        raise ValueError(
+            f"compute_stream_function solo está definido en 2D (D={bspline_space.D})"
+        )
+
+    # 1. Ensamblar K (reutilizada) y F_psi
+    K, F_psi, info = bspline_space.assemble_galerkin_system_psi(
+        g_field, density, density_mask=density_mask
+    )
+    F_psi = np.nan_to_num(F_psi, nan=0.0)
+    N_dof = bspline_space.N_dof
+    strides = info['strides']
+
+    # 2. Identificar DOFs de borde (bases con soporte en ∂Ω)
+    boundary = np.zeros(N_dof, dtype=bool)
+    for d in range(bspline_space.D):
+        n_b = bspline_space.n_bases[d]
+        md = (np.arange(N_dof) // strides[d]) % n_b
+        boundary |= (md == 0) | (md == n_b - 1)
+
+    # 3. Penalizar fuertemente los DOFs de borde: K[j,j] += penalty, F[j] = 0
+    K = K.tocsr()
+    K = K + sparse.diags(boundary.astype(float) * dirichlet_penalty)
+    F_psi[boundary] = 0.0
+
+    # Fijar también DOFs sin ninguna contribución (filas nulas) para evitar
+    # singularidad: K[j,j] = 1, F[j] = 0 (quedan en coeficiente cero).
+    row_norms = np.array(K.multiply(K).sum(axis=1)).ravel()
+    inactive = row_norms <= 1e-20
+    if np.any(inactive):
+        K = K + sparse.diags(inactive.astype(float))
+        F_psi[inactive] = 0.0
+    K = K.tocsr()
+
+    # 4. Resolver K·d = F_psi con el mismo solver robusto que para U
+    if N_dof <= 1:
+        coeffs_psi = np.zeros(N_dof, dtype=float)
+    else:
+        if solver == 'auto':
+            solver = 'direct' if N_dof < 5000 else 'cg'
+
+        if solver == 'direct' or N_dof < 5000:
+            try:
+                coeffs_psi = spsolve(K, F_psi)
+                if coeffs_psi is None or np.any(np.isnan(coeffs_psi)):
+                    raise ValueError("spsolve retornó None/NaN")
+            except Exception:
+                K_dense = K.toarray()
+                try:
+                    coeffs_psi = np.linalg.solve(K_dense, F_psi)
+                except np.linalg.LinAlgError:
+                    coeffs_psi, _, _, _ = np.linalg.lstsq(K_dense, F_psi, rcond=None)
+        else:
+            try:
+                M = spilu(K)
+                M_op = LinearOperator(K.shape, M.solve)
+                coeffs_psi, info_cg = cg(K, F_psi, M=M_op, tol=1e-10, maxiter=20000)
+                if info_cg != 0:
+                    raise ValueError(f"cg no convergió (info={info_cg})")
+            except Exception:
+                K_dense = K.toarray()
+                try:
+                    coeffs_psi = np.linalg.solve(K_dense, F_psi)
+                except np.linalg.LinAlgError:
+                    coeffs_psi, _, _, _ = np.linalg.lstsq(K_dense, F_psi, rcond=None)
+
+    # 5. Evaluar ψ sobre la grilla
+    psi = bspline_space.evaluate(coeffs_psi)
+
+    info_psi = {
+        'n_boundary_dofs': int(np.sum(boundary)),
+        'n_inactive_dofs': int(np.sum(inactive)),
+        'dirichlet_penalty': dirichlet_penalty,
+        'solver': solver,
+    }
+    return psi, coeffs_psi, info_psi
+
+
+def compute_reconstructed_field(coeffs_U, coeffs_psi, bspline_space):
+    """
+    Reconstruye el campo completo g_recon = ∇U + ∇⊥ψ.
+
+    Parameters
+    ----------
+    coeffs_U : ndarray (N_dof,)
+    coeffs_psi : ndarray (N_dof,) or None
+    bspline_space : BSplineTensorSpace
+
+    Returns
+    -------
+    g_recon : ndarray (D, n1, ..., nD)
+        Si coeffs_psi es None, retorna solo ∇U (backward compat).
+    """
+    grad_U = bspline_space.evaluate_gradient(coeffs_U)
+    if coeffs_psi is None:
+        return grad_U
+    grad_psi = bspline_space.evaluate_gradient(coeffs_psi)
+    g_recon = grad_U.copy()
+    g_recon[0] = grad_U[0] - grad_psi[1]   # dU/dx - dpsi/dy
+    g_recon[1] = grad_U[1] + grad_psi[0]   # dU/dy + dpsi/dx
+    return g_recon
+
+
+def recover_nonconservative_force(f_field, D_field, grad_U_recon):
+    """
+    Recupera el componente no-conservativo v = f + D·∇U_recon.
+
+    Parameters
+    ----------
+    f_field : ndarray (D, n1, ..., nD)
+        Drift estimado por Kramers-Moyal.
+    D_field : ndarray (D, D, n1, ..., nD)
+        Matriz de difusión (la misma escala usada para calcular g = -D⁻¹f).
+    grad_U_recon : ndarray (D, n1, ..., nD)
+        Gradiente del potencial reconstruido.
+
+    Returns
+    -------
+    v : ndarray (D, n1, ..., nD)
+        Fuerza no-conservativa. Exacta siempre: en equilibrio detallado
+        ∇U_recon = -D⁻¹f y por tanto v = 0; fuera de equilibrio, v ≠ 0
+        captura la componente rotacional.
+    """
+    D_dot_gradU = np.einsum('ij...,j...->i...', D_field, grad_U_recon)
+    v = f_field + D_dot_gradU
+    return v
+
+
+# Alias interno: evita el shadowing del parámetro compute_stream_function
+# dentro de reconstruct_potential_iga.
+_solve_stream_function = compute_stream_function
+
+
+# =============================================================================
 # Utilidades
 # =============================================================================
 
@@ -545,7 +748,8 @@ def reconstruct_potential_iga(drift, diffusion, edges, density,
                                dirichlet_penalty=1e12,
                                solver='auto',
                                use_connected_component=True,
-                               diffusion_factor = 0.5):
+                               diffusion_factor = 0.5,
+                               compute_stream_function=False):
     """
     Pipeline completo: robusto + Galerkin-B-spline + Helmholtz.
 
@@ -570,12 +774,26 @@ def reconstruct_potential_iga(drift, diffusion, edges, density,
         'auto', 'direct', 'cg'.
     use_connected_component : bool
         Si True, usa solo la componente conexa de la máscara que contiene el máximo.
+    compute_stream_function : bool
+        Si True y D==2, calcula la función de corriente ψ via la ecuación de
+        Poisson desacoplada -∇²ψ = -∇×g con condición de Dirichlet homogénea
+        ψ=0 en la frontera, el campo reconstruido completo
+        g_recon = ∇U + ∇⊥ψ y la fuerza no-conservativa v = f + D·∇U.
+        Default False para backward compatibility.
 
     Returns
     -------
     dict con:
         potential, coefficients, g_field, rank_D, condition_D,
         density_mask, gradient, residual, eta, is_equilibrium
+        y, si compute_stream_function=True y D==2:
+        stream_function, stream_function_coefficients, reconstructed_field,
+        reconstructed_drift, nonconservative_force (None en caso contrario)
+
+        Nota sobre dirección: 'reconstructed_field' es g = ∇U + ∇⊥ψ y
+        sus streamlines ASCIENDEN el potencial (g = -D⁻¹f por definición).
+        'reconstructed_drift' es f_recon = -D·g_recon y sus streamlines
+        siguen la dinámica física (descienden U, convergen a atractores).
     """
     D = drift.shape[0]
     grid_shape = tuple(len(e) for e in edges)
@@ -694,6 +912,54 @@ def reconstruct_potential_iga(drift, diffusion, edges, density,
     if density_mask is not None:
         U = np.where(density_mask, U, np.nan)
 
+    # ==========================================
+    # 7b. Stream function ψ (solo D==2, opcional)
+    # ==========================================
+    psi = None
+    coeffs_psi = None
+    g_recon = None
+    f_recon = None
+    v_force = None
+    if compute_stream_function and D == 2:
+        # Resolver -∇²ψ = -∇×g con Dirichlet homogénea penalizada en ∂Ω
+        psi, coeffs_psi, info_psi = _solve_stream_function(
+            bspline_space, g, density,
+            density_mask=density_mask,
+            solver=solver,
+            dirichlet_penalty=dirichlet_penalty
+        )
+        if density_mask is not None and psi is not None:
+            psi = np.where(density_mask, psi, np.nan)
+
+        # Campo completo reconstruido: g_recon = ∇U + ∇⊥ψ
+        g_recon = compute_reconstructed_field(c, coeffs_psi, bspline_space)
+
+        # Drift reconstruido: f_recon = -D·g_recon. Es la dirección FÍSICA
+        # de la dinámica (desciende U, converge a atractores). Ojo: g_recon
+        # apunta en dirección de ASCENSO de U, pues g = -D⁻¹f por definición.
+        # Si g_recon = g, entonces f_recon = f exactamente (no solo con D
+        # isótropo). Se calcula antes de enmascarar g_recon.
+        f_recon = -np.einsum('ij...,j...->i...', diffusion, g_recon)
+
+        if density_mask is not None and g_recon is not None:
+            g_recon = np.where(density_mask, g_recon, np.nan)
+        if density_mask is not None and f_recon is not None:
+            f_recon = np.where(density_mask, f_recon, np.nan)
+
+        # Fuerza no-conservativa exacta: v = f + D·∇U (residual de Galerkin).
+        # Nota: 'diffusion' ya está escalada por diffusion_factor, de modo
+        # que es coherente con g = -D⁻¹f calculado arriba.
+        grad_U_full = bspline_space.evaluate_gradient(c)
+        v_force = recover_nonconservative_force(drift, diffusion, grad_U_full)
+        if density_mask is not None and v_force is not None:
+            v_force = np.where(density_mask, v_force, np.nan)
+    elif compute_stream_function and D != 2:
+        warnings.warn(
+            f"compute_stream_function solo está disponible en D==2 (D={D}). "
+            "Ignorando.",
+            UserWarning
+        )
+
     # 8. Empaquetar resultado
     result = {
         'potential': U,
@@ -703,6 +969,11 @@ def reconstruct_potential_iga(drift, diffusion, edges, density,
         'condition_D': condition_D,
         'density_mask': density_mask,
         'bspline_space': bspline_space,
+        'stream_function': psi,
+        'stream_function_coefficients': coeffs_psi,
+        'reconstructed_field': g_recon,
+        'reconstructed_drift': f_recon,
+        'nonconservative_force': v_force,
     }
 
     if decompose_helmholtz:

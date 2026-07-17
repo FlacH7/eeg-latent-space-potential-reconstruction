@@ -39,7 +39,7 @@ os.makedirs(LOGGING_BASE_PATH, exist_ok=True)
 # Configuration parameters for simulations
 BURN_RATIO = 0.1
 DT = 0.001
-TIME=1800
+TIME=1800*2
 SEED = 123
 DEGREE = 2
 
@@ -88,7 +88,7 @@ CONFIGS = {
     'ring_attractor': {
         'model': 'ring_attractor', 'D': 2, 'dt': DT, 'T': TIME, 'burn_ratio': BURN_RATIO, 'seed': SEED,
         'params': {'alpha': 1.0, 'r0': 1.0, 'omega': 2.0, 'sigma': 0.3},
-        'bins': np.array([60, 60]),
+        'bins': np.array([100, 100]),
         'drift_components': [0, 1], 'diff_components': [(0,0), (1,1), (0,1)],
         'degree': DEGREE,
     },

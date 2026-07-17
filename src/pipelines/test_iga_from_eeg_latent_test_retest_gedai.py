@@ -52,6 +52,8 @@ from src.potential_reconstruction.km_tools_v2 import (
     plot_potential,
     plot_potential_2d,
     plot_potential_slice,
+    plot_nonconservative_force_2d,
+    plot_potential_combined_2d,
 )
 from src.potential_reconstruction.bw_optimization import optimal_bw
 
@@ -345,10 +347,10 @@ def main() -> int:
     config.update({
         "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{args.scoring_method}",
         "D": D,
-        "bins": [25] * D,
+        "bins": [50] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
-        "degree": 2,
+        "degree": 3,
     })
     print(f"\n  KM config: {config}")
 
@@ -396,7 +398,7 @@ def main() -> int:
         kernel="epanechnikov",
         dt=dt,
         sigma_smooth=1.0,
-        density_threshold=0.03,
+        density_threshold=0.01,
     )
 
     print(f"\n  Drift shape    : {drift.shape}")
@@ -486,9 +488,10 @@ def main() -> int:
         return_full=True,
         degree=config["degree"],
         decompose_helmholtz=True,
-        density_threshold=0.05,
+        density_threshold=0.01,
         rtol=1e-6,
         atol=1e-12,
+        compute_stream_function=True,
     )
 
     U_rec = result_iga["potential"]
@@ -556,6 +559,8 @@ def main() -> int:
             align_minima=True,
             align_to_zero=True,
             crop_to_valid=True,
+            stream_function=result_iga.get('stream_function'),        # NUEVO
+            reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -579,6 +584,34 @@ def main() -> int:
             fig_res.savefig(out_dir / "potential_2d_residual.png", dpi=150)
             plt.close(fig_res)
             print("  Saved potential_2d_residual.png")
+        
+        # ================================================================
+        # 8b. NUEVOS PLOTS: fuerza no-conservativa v y combinación U + v + ψ
+        # (solo cuando la stream function está disponible, D == 2)
+        # ================================================================
+        if result_iga.get('nonconservative_force') is not None:
+            fig_v = plot_nonconservative_force_2d(
+                result_iga['nonconservative_force'], edges,
+                title=f'Fuerza no-conservativa v = f + D·∇U — {config['model_name'].upper()}',
+                crop_to_valid=True,
+            )
+            fig_v.savefig(out_dir / "potential_2d_nonconservative_force.png", dpi=150)
+            plt.close(fig_v)
+            print("  Saved potential_2d_nonconservative_force.png")
+
+        if (result_iga.get('reconstructed_field') is not None
+                or result_iga.get('nonconservative_force') is not None):
+            fig_comb = plot_potential_combined_2d(
+                U_rec, edges,
+                stream_function=result_iga.get('stream_function'),
+                nonconservative_force=result_iga.get('nonconservative_force'),
+                reconstructed_field=result_iga.get('reconstructed_field'),
+                title=f'{config['model_name'].upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)',
+                crop_to_valid=True,
+            )
+            fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
+            plt.close(fig_comb)
+            print("  Saved potential_2d_combined.png")   
 
     elif D >= 3:
         dim_pairs = [(i, j) for i in range(min(D, 3)) for j in range(i + 1, min(D, 3))]

@@ -306,7 +306,7 @@ def _eval_drift_on_grid(drift_func, edges):
         vals = np.array([drift_func(p) for p in points])
     vals = np.asarray(vals)
     if vals.shape[:1] != (N,):
-        vals = np.broadcast_to(vals, (N,) + vals.shape)
+        vals = np.broadcast_to(vals, (N,) + vals.shape).copy()
     return vals.reshape(grid_shape + (vals.shape[-1],)).transpose(-1, *range(len(grid_shape)))
 
 def _eval_diffusion_on_grid(diffusion_func, edges):
@@ -320,7 +320,7 @@ def _eval_diffusion_on_grid(diffusion_func, edges):
         vals = np.array([diffusion_func(p) for p in points])
     vals = np.asarray(vals)
     if vals.shape[:1] != (N,):
-        vals = np.broadcast_to(vals, (N,) + vals.shape)
+        vals = np.broadcast_to(vals, (N,) + vals.shape).copy()
     D_out = vals.shape[-2]
     return vals.reshape(grid_shape + (D_out, D_out)).transpose(-2, -1, *range(len(grid_shape)))
 
@@ -335,7 +335,7 @@ def _eval_potential_on_grid(potential_func, edges):
         vals = np.array([potential_func(p) for p in points])
     vals = np.asarray(vals)
     if vals.shape[:1] != (N,):
-        return np.broadcast_to(vals, grid_shape)
+        return np.broadcast_to(vals, grid_shape).copy()
     return vals.reshape(grid_shape)
 
 # =============================================================================
@@ -975,6 +975,9 @@ def reconstruct_potential(drift, diffusion, edges, sigma_smooth=1.0,
         Histograma empírico de densidad. OBLIGATORIO para method='iga'.
     return_full : bool
         Si True, retorna el dict completo del pipeline IgA (incluye eta, rank_D, etc.)
+    compute_stream_function : bool, optional (via **iga_kwargs)
+        Si True y D==2, calcula la función de corriente ψ, el campo
+        reconstruido g_recon = ∇U + ∇⊥ψ y la fuerza no-conservativa v.
     **iga_kwargs : passed to reconstruct_potential_iga
 
     Returns
@@ -994,9 +997,12 @@ def reconstruct_potential(drift, diffusion, edges, sigma_smooth=1.0,
 
     # Extraer decompose_helmholtz de iga_kwargs o usar default True
     decompose_helmholtz = iga_kwargs.pop('decompose_helmholtz', True)
+    # Extraer compute_stream_function (default False: backward compat)
+    compute_stream_function = iga_kwargs.pop('compute_stream_function', False)
     result = reconstruct_potential_iga(
         drift, diffusion, edges, density,
         decompose_helmholtz=decompose_helmholtz,
+        compute_stream_function=compute_stream_function,
         **iga_kwargs
     )
 
@@ -1281,104 +1287,313 @@ def optimal_bw(data, bins, dt=1.0, p=2, kernel='epanechnikov',
 # SECCIÓN 5: PLOTEO (sin cambios funcionales)
 # =============================================================================
 
+def _bbox_from_valid(valid):
+    """Bounding box (x0, x1, y0, y1) en índices de las celdas True.
+    Retorna None si no hay ninguna."""
+    if not np.any(valid):
+        return None
+    xb = np.any(valid, axis=1)
+    yb = np.any(valid, axis=0)
+    x0 = int(np.argmax(xb))
+    x1 = int(len(xb) - np.argmax(xb[::-1]))
+    y0 = int(np.argmax(yb))
+    y1 = int(len(yb) - np.argmax(yb[::-1]))
+    return x0, x1, y0, y1
+
+
+def _plot_drift_field_panel(fig, pos, F, edges, title):
+    """
+    Panel de deriva D¹ como campo de fuerzas.
+
+    - D == 1: línea (fallback, no hay campo vectorial en 1D).
+    - D == 2: heatmap de |F| + quiver en el plano.
+    - D == 3: quiver tridimensional.
+    - D >= 4: no soportado (se indica en el panel).
+    """
+    D = F.shape[0]
+
+    if D == 1:
+        ax = fig.add_subplot(pos)
+        ax.plot(edges[0], F[0], 'b-', linewidth=2)
+        ax.set_xlabel('$x_1$')
+        ax.set_ylabel('Drift $D^{(1)}$')
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        return ax
+
+    if D == 2:
+        ax = fig.add_subplot(pos)
+        x_c, y_c = edges
+        X, Y = np.meshgrid(x_c, y_c, indexing='ij')
+        mag = np.sqrt(F[0]**2 + F[1]**2)
+        valid = ~np.isnan(mag)
+        im = ax.contourf(X, Y, np.ma.masked_invalid(mag), levels=20,
+                         cmap='viridis', alpha=0.75)
+        plt.colorbar(im, ax=ax, label='$|D^{(1)}|$')
+        skip = max(1, int(np.ceil(max(len(x_c), len(y_c)) / 18)))
+        # Quiver solo en celdas válidas (sin puntos fantasma en la zona NaN)
+        valid_s = valid[::skip, ::skip]
+        ax.quiver(X[::skip, ::skip][valid_s], Y[::skip, ::skip][valid_s],
+                  np.nan_to_num(F[0])[::skip, ::skip][valid_s],
+                  np.nan_to_num(F[1])[::skip, ::skip][valid_s],
+                  color='white', alpha=0.9)
+        ax.set_xlabel('$x_1$')
+        ax.set_ylabel('$x_2$')
+        # Recortar al bounding box de la región con información
+        bbox = _bbox_from_valid(valid)
+        if bbox is not None:
+            x0, x1, y0, y1 = bbox
+            ax.set_xlim(x_c[x0], x_c[x1 - 1])
+            ax.set_ylim(y_c[y0], y_c[y1 - 1])
+        else:
+            ax.set_xlim(x_c[0], x_c[-1])
+            ax.set_ylim(y_c[0], y_c[-1])
+        ax.set_title(title, pad=22)
+        ax.set_aspect('equal', adjustable='box')
+        return ax
+
+    if D == 3:
+        ax = fig.add_subplot(pos, projection='3d')
+        steps = [max(1, len(e) // 6) for e in edges]
+        s = tuple(slice(None, None, st) for st in steps)
+        X, Y, Z = np.meshgrid(*edges, indexing='ij')
+        valid = ~(np.isnan(F[0]) | np.isnan(F[1]) | np.isnan(F[2]))
+        valid_s = valid[s]
+        u = np.nan_to_num(F[0][s], nan=0.0)[valid_s]
+        v = np.nan_to_num(F[1][s], nan=0.0)[valid_s]
+        w = np.nan_to_num(F[2][s], nan=0.0)[valid_s]
+        mag = np.sqrt(u**2 + v**2 + w**2)
+        # Longitud de flechas proporcional a |F| (escala robusta p95)
+        span = max(np.ptp(edges[0]), np.ptp(edges[1]), np.ptp(edges[2]))
+        mag_ref = np.percentile(mag[mag > 0], 95) if np.any(mag > 0) else 1.0
+        q = ax.quiver(X[s][valid_s], Y[s][valid_s], Z[s][valid_s], u, v, w,
+                      length=0.15 * span / mag_ref, normalize=False,
+                      arrow_length_ratio=0.35)
+        ax.set_xlabel('$x_1$')
+        ax.set_ylabel('$x_2$')
+        ax.set_zlabel('$x_3$')
+        # Recortar al bounding box de la región con información
+        if np.any(valid):
+            for d, setlim in enumerate([ax.set_xlim3d, ax.set_ylim3d, ax.set_zlim3d]):
+                ax_mask = np.any(valid, axis=tuple(k for k in range(3) if k != d))
+                idx = np.where(ax_mask)[0]
+                setlim(edges[d][idx[0]], edges[d][idx[-1]])
+        ax.set_title(title)
+        return ax
+
+    ax = fig.add_subplot(pos)
+    ax.text(0.5, 0.5, f'Campo de deriva no soportado para D={D}',
+            ha='center', va='center', transform=ax.transAxes)
+    ax.set_title(title)
+    ax.axis('off')
+    return ax
+
+
+def _plot_diffusion_map_panel(fig, pos, DIFF, edges, i, j, fixed_coords,
+                              title):
+    """
+    Panel de una componente de difusión D²(i,j) como mapa 2D.
+
+    - D == 1: línea (fallback).
+    - D == 2: mapa completo sobre (x1, x2).
+    - D >= 3: corte en las dimensiones (x1, x2) fijando el resto según
+      fixed_coords (default 0.0).
+    """
+    D = DIFF.ndim - 2
+    ax = fig.add_subplot(pos)
+
+    if D == 1:
+        ax.plot(edges[0], DIFF[i, j], 'g-', linewidth=2)
+        ax.set_xlabel('$x_1$')
+        ax.set_ylabel(f'$D^{{({i+1},{j+1})}}$')
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        return ax
+
+    slice_idx = [slice(None), slice(None)]
+    fixed_str = ''
+    if D >= 3:
+        fixed_vals = []
+        for d in range(2, D):
+            fixed_val = fixed_coords.get(d, 0.0)
+            idx = int(np.argmin(np.abs(edges[d] - fixed_val)))
+            slice_idx.append(idx)
+            fixed_vals.append(f'$x_{d+1}$={edges[d][idx]:.2f}')
+        fixed_str = '\n(' + ', '.join(fixed_vals) + ')'
+
+    M = DIFF[i, j][tuple(slice_idx)]
+    x_c, y_c = edges[0], edges[1]
+    X, Y = np.meshgrid(x_c, y_c, indexing='ij')
+    im = ax.contourf(X, Y, np.ma.masked_invalid(M), levels=20, cmap='magma')
+    # format='%.4f' evita el texto de offset científico de la colorbar,
+    # que solapa el título del panel cuando el campo es casi constante
+    plt.colorbar(im, ax=ax, label=f'$D^{{({i+1},{j+1})}}$', format='%.4f')
+    ax.set_xlabel('$x_1$')
+    ax.set_ylabel('$x_2$')
+    # Recortar al bounding box de la región con información
+    bbox = _bbox_from_valid(~np.isnan(M))
+    if bbox is not None:
+        x0, x1, y0, y1 = bbox
+        ax.set_xlim(x_c[x0], x_c[x1 - 1])
+        ax.set_ylim(y_c[y0], y_c[y1 - 1])
+    else:
+        ax.set_xlim(x_c[0], x_c[-1])
+        ax.set_ylim(y_c[0], y_c[-1])
+    ax.set_title(title + fixed_str, pad=22)
+    ax.set_aspect('equal', adjustable='box')
+    return ax
+
+
 def plot_km_components(drift, diffusion, edges,
                        drift_components=None,
                        diff_components=None,
                        fixed_coords=None,
                        theoretical=None,
                        figsize=None):
+    """
+    Visualización de los coeficientes de Kramers-Moyal.
+
+    - Deriva D¹: campo de fuerzas (quiver). En 2D, flechas en el plano
+      sobre un heatmap de |D¹|; en 3D, quiver tridimensional. Toda la
+      información de la deriva en un solo gráfico (no por componentes).
+    - Difusión D²: un mapa 2D por cada componente seleccionada en
+      `diff_components` (p.ej. (1,1), (2,2), (1,2)). En D >= 3 se plotea
+      el corte en (x1, x2) fijando las demás coordenadas con
+      `fixed_coords` (default 0.0).
+
+    Genera DOS figuras separadas (imágenes independientes): una para la
+    deriva y otra para las difusiones. Si `theoretical` está disponible,
+    cada figura tiene dos filas: arriba lo estimado y abajo el ground truth.
+
+    Parameters
+    ----------
+    drift : ndarray (D, n1, ..., nD)
+    diffusion : ndarray (D, D, n1, ..., nD)
+    edges : list of D arrays
+    drift_components : list of int or None
+        Si es None o vacío, no se plotea la deriva. (Se mantiene por
+        compatibilidad: el campo usa siempre todas las componentes.)
+    diff_components : list of (i, j) or None
+        Componentes de difusión a plotear como mapas.
+    fixed_coords : dict, optional
+        {dim_index: valor} para fijar dimensiones >= 2 en los cortes de
+        difusión (default 0.0).
+    theoretical : dict, optional
+        Ground truth con 'drift_func'/'diffusion_func' (y opcionalmente
+        'drift_grid'/'diffusion_grid' para evaluar directo en `edges`).
+    figsize : tuple, optional
+        DEPRECADO en la versión de imágenes separadas: se ignora y cada
+        figura se auto-escala según el número de paneles. Se mantiene en
+        la firma solo por compatibilidad.
+
+    Returns
+    -------
+    figs : dict
+        {'drift': Figure o None, 'diffusion': Figure o None}. Cada figura
+        es independiente y debe guardarse/cerrarse por separado. La key es
+        None si no se pidió ese grupo de componentes.
+    """
     if fixed_coords is None:
         fixed_coords = {}
     D = drift.shape[0]
-    centers = edges
-    n_plots = 0
-    if drift_components:
-        n_plots += len(drift_components)
-    if diff_components:
-        n_plots += len(diff_components)
-    if n_plots == 0:
+
+    show_drift = bool(drift_components)
+    diff_components = diff_components or []
+    n_diff = len(diff_components)
+    if not show_drift and n_diff == 0:
         raise ValueError("Debe especificarse al menos drift_components o diff_components")
-    max_cols = 3
-    ncols = min(max_cols, n_plots)
-    nrows = (n_plots + ncols - 1) // ncols
-    if figsize is None:
-        figsize = (ncols * 5, nrows * 4)
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
-    plot_idx = 0
 
-    if drift_components:
-        for i in drift_components:
-            ax = axes.flat[plot_idx]
-            varying_dim = i
-            x_vals = centers[varying_dim]
-            slice_idx = []
+    # ------------------------------------------------------------------
+    # Ground truth evaluado sobre la misma grilla (si disponible)
+    # ------------------------------------------------------------------
+    drift_theo = None
+    diff_theo = None
+    if theoretical is not None:
+        try:
+            if isinstance(theoretical, dict) and 'drift_grid' in theoretical:
+                drift_theo = theoretical['drift_grid'](edges)
+            elif isinstance(theoretical, dict) and 'drift_func' in theoretical:
+                drift_theo = _eval_drift_on_grid(theoretical['drift_func'], edges)
+        except Exception as e:
+            warnings.warn(f"No se pudo evaluar drift teórico: {e}", UserWarning)
+        try:
+            if isinstance(theoretical, dict) and 'diffusion_grid' in theoretical:
+                diff_theo = theoretical['diffusion_grid'](edges)
+            elif isinstance(theoretical, dict) and 'diffusion_func' in theoretical:
+                diff_theo = _eval_diffusion_on_grid(theoretical['diffusion_func'], edges)
+        except Exception as e:
+            warnings.warn(f"No se pudo evaluar difusión teórica: {e}", UserWarning)
+
+    # ------------------------------------------------------------------
+    # Recortar el ground truth a la región con información del estimado:
+    # se enmascara con los NaN del reconstruido para que los tramos sin
+    # datos (donde el campo teórico puede ser muy grande) no distorsionen
+    # las escalas de color al comparar.
+    # ------------------------------------------------------------------
+    if drift_theo is not None:
+        valid_drift = ~np.any(np.isnan(drift), axis=0)
+        if np.any(valid_drift):
             for d in range(D):
-                if d == varying_dim:
-                    slice_idx.append(slice(None))
-                else:
-                    fixed_val = fixed_coords.get(d, 0.0)
-                    idx_fixed = np.argmin(np.abs(centers[d] - fixed_val))
-                    slice_idx.append(idx_fixed)
-            drift_cut = drift[i][tuple(slice_idx)]
-            ax.plot(x_vals, drift_cut, 'b-', label='Estimated', linewidth=2)
-            if theoretical is not None:
-                x_eval = np.zeros((len(x_vals), D))
-                x_eval[:, varying_dim] = x_vals
-                for d in range(D):
-                    if d != varying_dim:
-                        x_eval[:, d] = fixed_coords.get(d, 0.0)
-                drift_theo = theoretical['drift_func'](x_eval)[:, i]
-                ax.plot(x_vals, drift_theo, 'r--', label='Theoretical', linewidth=2)
-            ax.set_xlabel(f'$x_{varying_dim+1}$')
-            ax.set_ylabel(f'Drift $D^{{(e_{i+1})}}$')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            fixed_str = ', '.join([f"$x_{d+1}={fixed_coords.get(d,0):.2f}$"
-                                   for d in range(D) if d != varying_dim])
-            ax.set_title(f'Drift comp. {i+1}\n({fixed_str})')
-            plot_idx += 1
-
-    if diff_components:
+                drift_theo[d] = np.where(valid_drift, drift_theo[d], np.nan)
+    if diff_theo is not None:
         for (i, j) in diff_components:
-            ax = axes.flat[plot_idx]
-            varying_dim = i
-            x_vals = centers[varying_dim]
-            slice_idx = []
-            for d in range(D):
-                if d == varying_dim:
-                    slice_idx.append(slice(None))
-                else:
-                    fixed_val = fixed_coords.get(d, 0.0)
-                    idx_fixed = np.argmin(np.abs(centers[d] - fixed_val))
-                    slice_idx.append(idx_fixed)
-            diff_cut = diffusion[i, j][tuple(slice_idx)]
-            ax.plot(x_vals, diff_cut, 'g-', label='Estimated', linewidth=2)
-            if theoretical is not None:
-                x_eval = np.zeros((len(x_vals), D))
-                x_eval[:, varying_dim] = x_vals
-                for d in range(D):
-                    if d != varying_dim:
-                        x_eval[:, d] = fixed_coords.get(d, 0.0)
-                diff_theo = theoretical['diffusion_func'](x_eval)
-                if diff_theo.ndim == 2:
-                    diff_theo_val = diff_theo[i, j]
-                else:
-                    diff_theo_val = diff_theo[:, i, j]
-                ax.axhline(y=diff_theo_val, color='r', linestyle='--',
-                           linewidth=2, label=f'Theoretical = {np.mean(diff_theo_val):.3f}')
-            ax.set_xlabel(f'$x_{varying_dim+1}$')
-            ax.set_ylabel(f'Diffusion $D^{{({i+1},{j+1})}}$')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            fixed_str = ', '.join([f"$x_{d+1}={fixed_coords.get(d,0):.2f}$"
-                                   for d in range(D) if d != varying_dim])
-            ax.set_title(f'Diffusion ({i+1},{j+1})\n({fixed_str})')
-            plot_idx += 1
+            valid_ij = ~np.isnan(diffusion[i, j])
+            if np.any(valid_ij):
+                diff_theo[i, j] = np.where(valid_ij, diff_theo[i, j], np.nan)
 
-    for idx in range(plot_idx, len(axes.flat)):
-        axes.flat[idx].axis('off')
-    fig.tight_layout()
-    return fig
+    # ------------------------------------------------------------------
+    # Layout: DOS figuras separadas — una para la deriva, otra para las
+    # difusiones. En cada una: fila 0 = estimado, fila 1 = teórico
+    # (si hay ground truth).
+    # ------------------------------------------------------------------
+    nrows = 2 if theoretical is not None else 1
+    rows = [(0, drift, diffusion, 'Estimado')]
+    if theoretical is not None:
+        rows.append((1, drift_theo, diff_theo, 'Teórico'))
+
+    figs = {'drift': None, 'diffusion': None}
+
+    # ---- Figura 1: deriva (estimada vs teórica) ----
+    if show_drift:
+        fig_drift = plt.figure(figsize=(7.0, 6.0 * nrows))
+        gs = fig_drift.add_gridspec(nrows, 1)
+        for row_idx, drift_g, _, label in rows:
+            if drift_g is not None:
+                _plot_drift_field_panel(
+                    fig_drift, gs[row_idx, 0], drift_g, edges,
+                    title=f'Deriva $D^{{(1)}}$ — {label}'
+                )
+            else:
+                ax = fig_drift.add_subplot(gs[row_idx, 0])
+                ax.text(0.5, 0.5, 'No disponible', ha='center', va='center',
+                        transform=ax.transAxes)
+                ax.set_title(f'Deriva $D^{{(1)}}$ — {label}')
+                ax.axis('off')
+        fig_drift.tight_layout()
+        figs['drift'] = fig_drift
+
+    # ---- Figura 2: difusiones (estimadas vs teóricas) ----
+    if n_diff > 0:
+        fig_diff = plt.figure(figsize=(5.5 * n_diff, 5.0 * nrows))
+        gs = fig_diff.add_gridspec(nrows, n_diff)
+        for row_idx, _, diff_g, label in rows:
+            for col, (i, j) in enumerate(diff_components):
+                if diff_g is not None:
+                    _plot_diffusion_map_panel(
+                        fig_diff, gs[row_idx, col], diff_g, edges, i, j,
+                        fixed_coords,
+                        title=f'Difusión $D^{{({i+1},{j+1})}}$ — {label}'
+                    )
+                else:
+                    ax = fig_diff.add_subplot(gs[row_idx, col])
+                    ax.text(0.5, 0.5, 'No disponible', ha='center', va='center',
+                            transform=ax.transAxes)
+                    ax.set_title(f'Difusión $D^{{({i+1},{j+1})}}$ — {label}')
+                    ax.axis('off')
+        fig_diff.tight_layout()
+        figs['diffusion'] = fig_diff
+
+    return figs
 
 
 def plot_potential(U_reconstructed, edges, theoretical=None, component_labels=None,
@@ -1426,6 +1641,37 @@ def _crop_to_valid(U_arr, edge_list):
     U_crop = U_arr[x_start:x_end, y_start:y_end]
     edges_crop = [edge_list[0][x_start:x_end], edge_list[1][y_start:y_end]]
     return U_crop, edges_crop
+
+
+def _valid_bbox(U_arr):
+    """Bounding box (x_start, x_end, y_start, y_end) de celdas no-NaN."""
+    valid = ~np.isnan(U_arr)
+    if not np.any(valid):
+        return 0, U_arr.shape[0], 0, U_arr.shape[1]
+    x_mask = np.any(valid, axis=1)
+    y_mask = np.any(valid, axis=0)
+    x_start = np.argmax(x_mask)
+    x_end = len(x_mask) - np.argmax(x_mask[::-1])
+    y_start = np.argmax(y_mask)
+    y_end = len(y_mask) - np.argmax(y_mask[::-1])
+    return x_start, x_end, y_start, y_end
+
+
+def _overlay_streamlines(ax, x_centers, y_centers, g1, g2, stream_color='white',
+                         stream_density=2.0, linewidth=1.2):
+    """Superpone streamlines del campo (g1, g2) sobre un eje, tolerando NaN.
+
+    g1, g2 usan orientación (nx, ny) — igual que las mallas X, Y creadas con
+    meshgrid(indexing='ij') en este módulo; streamplot requiere (ny, nx),
+    de ahí la transposición.
+    """
+    valid = ~np.isnan(g1) & ~np.isnan(g2)
+    if not np.any(valid):
+        return
+    ax.streamplot(x_centers, y_centers,
+                  np.nan_to_num(g1).T, np.nan_to_num(g2).T,
+                  color=stream_color, density=stream_density,
+                  linewidth=linewidth, arrowstyle='->', arrowsize=1.0)
 
 
 # def plot_potential_2d(U, edges, U_theoretical=None, title_est="Reconstructed Potential",
@@ -1520,10 +1766,36 @@ def _crop_to_valid(U_arr, edge_list):
 def plot_potential_2d(U, edges, U_theoretical=None, title_est="Reconstructed Potential",
                       title_theo="Theoretical Potential", levels=50, cmap='viridis',
                       figsize=(12, 5), unify_colorbar=False, align_minima=False,
-                      align_to_zero=False, crop_to_valid=False, clip_percentile=None):
+                      align_to_zero=False, crop_to_valid=False, clip_percentile=None,
+                      stream_function=None, reconstructed_field=None,
+                      reconstructed_drift=None,
+                      show_streamlines=True, stream_color='white',
+                      stream_density=2.0):
     """
     Plot 2D potential. If crop_to_valid=True, automatically zooms to the
     region where U is not NaN (useful when density_threshold masks large areas).
+
+    Parameters (nuevos)
+    -------------------
+    stream_function : ndarray (n1, n2) or None
+        Función de corriente ψ (reservado para extensiones; no requerido para
+        las streamlines).
+    reconstructed_field : ndarray (2, n1, n2) or None
+        Campo completo g_recon = ∇U + ∇⊥ψ. Si está disponible y
+        show_streamlines=True, se superponen streamlines sobre el heatmap
+        del potencial reconstruido. OJO: g = -D⁻¹f, así que estas
+        streamlines ASCIENDEN el potencial (salen de los mínimos).
+    reconstructed_drift : ndarray (2, n1, n2) or None
+        Drift reconstruido f_recon = -D·g_recon. Si se provee, tiene
+        prioridad sobre reconstructed_field para las streamlines y muestra
+        la dirección FÍSICA de la dinámica (desciende U, converge a
+        atractores).
+    show_streamlines : bool
+        Si True y hay campo disponible, mostrar streamlines.
+    stream_color : str
+        Color de las streamlines (default 'white').
+    stream_density : float
+        Densidad de streamlines (default 2.0).
     """
     if U.ndim != 2:
         raise ValueError("This function is only for 2D potentials.")
@@ -1531,8 +1803,27 @@ def plot_potential_2d(U, edges, U_theoretical=None, title_est="Reconstructed Pot
     U_plot = U.copy()
     edges_plot = [e.copy() for e in edges]
 
+    # Bounding box de la región válida (para recortar el campo reconstruido
+    # de forma consistente con el recorte de U).
     if crop_to_valid:
+        x0, x1, y0, y1 = _valid_bbox(U_plot)
         U_plot, edges_plot = _crop_to_valid(U_plot, edges_plot)
+
+    # Campo para las streamlines: el drift (dirección física) tiene prioridad
+    # sobre g_recon (dirección de ascenso, g = -D⁻¹f).
+    stream_field = reconstructed_drift if reconstructed_drift is not None \
+        else reconstructed_field
+
+    # Preparar componentes del campo (si disponible)
+    g1 = g2 = None
+    if show_streamlines and stream_field is not None:
+        g_arr = np.asarray(stream_field)
+        if g_arr.shape[0] == 2 and g_arr.shape[1:] == U.shape:
+            g1 = g_arr[0].copy()
+            g2 = g_arr[1].copy()
+            if crop_to_valid:
+                g1 = g1[x0:x1, y0:y1]
+                g2 = g2[x0:x1, y0:y1]
 
     x_centers, y_centers = edges_plot
     X, Y = np.meshgrid(x_centers, y_centers, indexing='ij')
@@ -1619,6 +1910,11 @@ def plot_potential_2d(U, edges, U_theoretical=None, title_est="Reconstructed Pot
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
 
         contour1 = ax1.contourf(X, Y, U_plot, levels=levels1, cmap=cmap, vmin=vmin1, vmax=vmax1)
+        # NUEVO: streamlines del campo completo g_recon = ∇U + ∇⊥ψ (si disponible)
+        if g1 is not None and g1.shape == X.shape:
+            _overlay_streamlines(ax1, x_centers, y_centers, g1, g2,
+                                 stream_color=stream_color,
+                                 stream_density=stream_density)
         plt.colorbar(contour1, ax=ax1, label='Potential U')
         ax1.set_xlabel('x')
         ax1.set_ylabel('y')
@@ -1647,6 +1943,11 @@ def plot_potential_2d(U, edges, U_theoretical=None, title_est="Reconstructed Pot
 
         fig, ax = plt.subplots(1, 1, figsize=figsize)
         contour = ax.contourf(X, Y, U_plot, levels=contour_levels, cmap=cmap, vmin=vmin, vmax=vmax)
+        # NUEVO: streamlines del campo completo g_recon = ∇U + ∇⊥ψ (si disponible)
+        if g1 is not None and g1.shape == X.shape:
+            _overlay_streamlines(ax, x_centers, y_centers, g1, g2,
+                                 stream_color=stream_color,
+                                 stream_density=stream_density)
         plt.colorbar(contour, ax=ax, label='Potential U')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
@@ -1661,10 +1962,34 @@ def plot_potential_slice(U, edges, dims=(0, 1), fixed_coords=None,
                          U_theoretical=None, title="Potencial (corte 2D)",
                          levels=50, cmap='viridis', figsize=(10, 4.5),
                          unify_colorbar=False, align_minima=False,
-                         align_to_zero=False, crop_to_valid=False):
+                         align_to_zero=False, crop_to_valid=False,
+                         stream_function=None, reconstructed_field=None,
+                         reconstructed_drift=None,
+                         show_streamlines=True, stream_color='white',
+                         stream_density=2.0):
     """
     Visualiza un corte 2D de un potencial D-dimensional.
     Si crop_to_valid=True, recorta automáticamente a la región con datos válidos.
+
+    Parameters (nuevos)
+    -------------------
+    stream_function : ndarray or None
+        Función de corriente ψ (reservado para extensiones).
+    reconstructed_field : ndarray (D, n1, ..., nD) or None
+        Campo completo g_recon = ∇U + ∇⊥ψ. Si se provee, se extrae el slice
+        correspondiente (fijando las mismas coordenadas que para U) y se
+        superponen streamlines de las componentes (dims[0], dims[1]).
+        OJO: estas streamlines ASCIENDEN el potencial (g = -D⁻¹f).
+    reconstructed_drift : ndarray (D, n1, ..., nD) or None
+        Drift reconstruido f_recon = -D·g_recon. Si se provee, tiene
+        prioridad sobre reconstructed_field y las streamlines siguen la
+        dirección FÍSICA de la dinámica (descienden U).
+    show_streamlines : bool
+        Si True y hay campo disponible, mostrar streamlines.
+    stream_color : str
+        Color de las streamlines (default 'white').
+    stream_density : float
+        Densidad de streamlines (default 2.0).
     """
     D = len(edges)
     i, j = dims
@@ -1686,11 +2011,27 @@ def plot_potential_slice(U, edges, dims=(0, 1), fixed_coords=None,
 
     U_slice = U[tuple(slice_idx)]
 
+    # --- 1b. Extraer el mismo corte del campo para streamlines ---
+    # El drift (dirección física) tiene prioridad sobre g_recon (ascenso).
+    stream_field = reconstructed_drift if reconstructed_drift is not None \
+        else reconstructed_field
+    g1 = g2 = None
+    if show_streamlines and stream_field is not None:
+        g_arr = np.asarray(stream_field)
+        if g_arr.shape[0] == D and g_arr.shape[1:] == U.shape:
+            # Las componentes del slice 2D son las direcciones (i, j) del campo
+            g1 = g_arr[i][tuple(slice_idx)]
+            g2 = g_arr[j][tuple(slice_idx)]
+
     # --- 2. Recortar a región válida (opcional) ---
     x = edges[i].copy()
     y = edges[j].copy()
     if crop_to_valid:
+        x0, x1, y0, y1 = _valid_bbox(U_slice)
         U_slice, x, y = _crop_to_valid(U_slice, [x, y])
+        if g1 is not None:
+            g1 = g1[x0:x1, y0:y1]
+            g2 = g2[x0:x1, y0:y1]
     X, Y = np.meshgrid(x, y, indexing='ij')
 
     # --- 3. Extraer corte 2D del teórico (si existe) ---
@@ -1751,6 +2092,11 @@ def plot_potential_slice(U, edges, dims=(0, 1), fixed_coords=None,
 
         cnt1 = ax1.contourf(X, Y, U_plot, levels=contour_levels, cmap=cmap,
                             vmin=vmin, vmax=vmax)
+        # NUEVO: streamlines del campo completo en el slice (si disponible)
+        if g1 is not None and g1.shape == X.shape:
+            _overlay_streamlines(ax1, x, y, g1, g2,
+                                 stream_color=stream_color,
+                                 stream_density=stream_density)
         plt.colorbar(cnt1, ax=ax1, label='U')
         ax1.set_aspect('equal', adjustable='box')
         ax1.set_xlabel(f'x{i+1}')
@@ -1769,6 +2115,11 @@ def plot_potential_slice(U, edges, dims=(0, 1), fixed_coords=None,
         fig, ax = plt.subplots(1, 1, figsize=figsize)
         cnt = ax.contourf(X, Y, U_plot, levels=contour_levels, cmap=cmap,
                           vmin=vmin, vmax=vmax)
+        # NUEVO: streamlines del campo completo en el slice (si disponible)
+        if g1 is not None and g1.shape == X.shape:
+            _overlay_streamlines(ax, x, y, g1, g2,
+                                 stream_color=stream_color,
+                                 stream_density=stream_density)
         plt.colorbar(cnt, ax=ax, label='U')
         ax.set_aspect('equal', adjustable='box')
         ax.set_xlabel(f'x{i+1}')
@@ -1849,3 +2200,173 @@ def plot_potential_slice(U, edges, dims=(0, 1), fixed_coords=None,
 #     fig.tight_layout()
 #     plt.show()
 #     return fig
+
+
+# =============================================================================
+# SECCIÓN 5b: PLOTS DE NO-EQUILIBRIO (v, ψ y campo reconstruido)
+# =============================================================================
+
+def plot_nonconservative_force_2d(v_field, edges,
+                                  title='Fuerza no-conservativa v = f + D·∇U',
+                                  cmap='plasma', levels=20, skip=6,
+                                  scale=None, width=0.004, quiver_color='white',
+                                  figsize=(8, 7), crop_to_valid=False):
+    """
+    Plot de la fuerza no-conservativa v (un solo panel).
+
+    Muestra |v| como heatmap y el campo vectorial v como quiver submuestreado.
+    Es el plot más informativo físicamente: indica "qué empuja al sistema
+    fuera del equilibrio". Para un ring attractor se ven flechas circulares.
+
+    Parameters
+    ----------
+    v_field : ndarray (2, n1, n2)
+        Fuerza no-conservativa v = f + D·∇U (key 'nonconservative_force'
+        del dict retornado por reconstruct_potential).
+    edges : list of 2 arrays
+        Centros de bins por dirección.
+    skip : int
+        Submuestreo del quiver (default 6).
+    scale, width : float
+        Parámetros de matplotlib quiver. scale=None (default) = auto-escala.
+    crop_to_valid : bool
+        Si True, recorta a la bounding box de celdas con |v| no-NaN.
+
+    Returns
+    -------
+    fig : matplotlib Figure
+    """
+    v = np.asarray(v_field)
+    if v.shape[0] != 2:
+        raise ValueError("v_field debe tener shape (2, n1, n2)")
+
+    v1, v2 = v[0], v[1]
+    v_mag = np.sqrt(v1**2 + v2**2)
+    edges_plot = [e.copy() for e in edges]
+
+    if crop_to_valid:
+        v_mag, edges_plot = _crop_to_valid(v_mag, edges_plot)
+        x0, x1, y0, y1 = _valid_bbox(np.sqrt(np.asarray(v_field[0])**2 +
+                                             np.asarray(v_field[1])**2))
+        v1 = v1[x0:x1, y0:y1]
+        v2 = v2[x0:x1, y0:y1]
+
+    X, Y = np.meshgrid(edges_plot[0], edges_plot[1], indexing='ij')
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.contourf(X, Y, np.nan_to_num(v_mag, nan=0.0), levels=levels, cmap=cmap)
+    ax.quiver(X[::skip, ::skip], Y[::skip, ::skip],
+              np.nan_to_num(v1)[::skip, ::skip], np.nan_to_num(v2)[::skip, ::skip],
+              color=quiver_color, alpha=0.8, scale=scale, width=width)
+    plt.colorbar(im, ax=ax, label='|v|')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_title(title)
+    ax.axis('equal')
+    fig.tight_layout()
+    return fig
+
+
+def plot_potential_combined_2d(U, edges, stream_function=None,
+                               nonconservative_force=None,
+                               reconstructed_field=None,
+                               reconstructed_drift=None,
+                               title='U (fondo) + v (flechas rojas) + streamlines (blanco)',
+                               levels=25, cmap='viridis', skip=8,
+                               scale=None, width=0.004,
+                               stream_color='white', stream_density=1.5,
+                               psi_levels=10, figsize=(9, 8),
+                               crop_to_valid=False):
+    """
+    Plot combinado del mecanismo físico completo (un solo panel).
+
+    - Fondo: heatmap del potencial U (el "riel").
+    - Superposición opcional: isolíneas de ψ (gris).
+    - Superposición opcional: fuerza no-conservativa v como quiver (rojo),
+      el "empuje tangencial".
+    - Superposición opcional: streamlines del campo completo reconstruido
+      g_recon = ∇U + ∇⊥ψ (blanco), las trayectorias reales.
+
+    Parameters
+    ----------
+    U : ndarray (n1, n2)
+    edges : list of 2 arrays
+    stream_function : ndarray (n1, n2) or None
+    nonconservative_force : ndarray (2, n1, n2) or None
+    reconstructed_field : ndarray (2, n1, n2) or None
+        Campo g_recon = ∇U + ∇⊥ψ para las streamlines. OJO: asciende U
+        (g = -D⁻¹f). Se usa solo si reconstructed_drift es None.
+    reconstructed_drift : ndarray (2, n1, n2) or None
+        Drift reconstruido f_recon = -D·g_recon. Si se provee, tiene
+        prioridad para las streamlines y muestra la dirección FÍSICA
+        (desciende U, converge a atractores).
+    skip : int
+        Submuestreo del quiver de v (default 8).
+    crop_to_valid : bool
+        Si True, recorta todo a la bounding box de celdas no-NaN de U.
+
+    Returns
+    -------
+    fig : matplotlib Figure
+    """
+    if U.ndim != 2:
+        raise ValueError("This function is only for 2D potentials.")
+
+    U_plot = U.copy()
+    edges_plot = [e.copy() for e in edges]
+    psi_plot = None if stream_function is None else np.asarray(stream_function).copy()
+    v1 = v2 = g1 = g2 = None
+    if nonconservative_force is not None:
+        v_arr = np.asarray(nonconservative_force)
+        if v_arr.shape[0] == 2 and v_arr.shape[1:] == U.shape:
+            v1, v2 = v_arr[0].copy(), v_arr[1].copy()
+    # El drift (dirección física) tiene prioridad sobre g_recon (ascenso)
+    stream_field = reconstructed_drift if reconstructed_drift is not None \
+        else reconstructed_field
+    if stream_field is not None:
+        g_arr = np.asarray(stream_field)
+        if g_arr.shape[0] == 2 and g_arr.shape[1:] == U.shape:
+            g1, g2 = g_arr[0].copy(), g_arr[1].copy()
+
+    if crop_to_valid:
+        x0, x1, y0, y1 = _valid_bbox(U_plot)
+        U_plot, edges_plot = _crop_to_valid(U_plot, edges_plot)
+        if psi_plot is not None:
+            psi_plot = psi_plot[x0:x1, y0:y1]
+        if v1 is not None:
+            v1 = v1[x0:x1, y0:y1]
+            v2 = v2[x0:x1, y0:y1]
+        if g1 is not None:
+            g1 = g1[x0:x1, y0:y1]
+            g2 = g2[x0:x1, y0:y1]
+
+    X, Y = np.meshgrid(edges_plot[0], edges_plot[1], indexing='ij')
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.contourf(X, Y, U_plot, levels=levels, cmap=cmap, alpha=0.7)
+
+    # Isolíneas de ψ (opcional, en gris)
+    if psi_plot is not None and psi_plot.shape == X.shape and np.any(~np.isnan(psi_plot)):
+        ax.contour(X, Y, psi_plot, levels=psi_levels, colors='gray',
+                   linewidths=0.8, alpha=0.5)
+
+    # Fuerza no-conservativa v como quiver submuestreado (rojo)
+    if v1 is not None and v1.shape == X.shape:
+        ax.quiver(X[::skip, ::skip], Y[::skip, ::skip],
+                  np.nan_to_num(v1)[::skip, ::skip], np.nan_to_num(v2)[::skip, ::skip],
+                  color='red', alpha=0.7, scale=scale, width=width)
+
+    # Streamlines del campo completo reconstruido (blanco)
+    if g1 is not None and g1.shape == X.shape:
+        _overlay_streamlines(ax, edges_plot[0], edges_plot[1], g1, g2,
+                             stream_color=stream_color,
+                             stream_density=stream_density,
+                             linewidth=1.0)
+
+    plt.colorbar(im, ax=ax, label='U', shrink=0.7)
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_title(title)
+    ax.axis('equal')
+    fig.tight_layout()
+    return fig

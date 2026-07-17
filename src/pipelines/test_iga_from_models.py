@@ -25,6 +25,8 @@ from src.potential_reconstruction.km_tools_v2 import (
     reconstruct_potential_1D,
     plot_potential,
     plot_potential_2d,
+    plot_nonconservative_force_2d,
+    plot_potential_combined_2d,
     # optimal_bw
 )
 from src.potential_reconstruction.bw_optimization import optimal_bw
@@ -56,7 +58,7 @@ T = TIME
 # ELEGIR MODELO
 # ================================================================
 models = ['single_well', 'asymmetric_double_well', 'ou', 'double_well', 'multi_stable', 'triple_well_3d', 'ring_attractor', 'stochastic_oscillator']
-model_name = models[5]  
+model_name = models[6]  
 
 config = configs[model_name]
 D = config['D']
@@ -203,7 +205,7 @@ print(f"\n[4] Densidad empírica shape: {density.shape}")
 # ================================================================
 # 5. PLOT D^1 y D^2 CON TEÓRICOS
 # ================================================================
-fig_km = plot_km_components(
+figs_km = plot_km_components(
     drift, diffusion, edges,
     drift_components=config['drift_components'],
     diff_components=config['diff_components'],
@@ -211,11 +213,16 @@ fig_km = plot_km_components(
     theoretical=theoretical,
     figsize=(12, 8)
 )
-plt.suptitle(f"{model_name.replace("_", " ").title()} Model — D^1 and D^2 estimated vs theoretical", fontsize=14)
-plt.tight_layout(rect=[0, 0, 1, 0.95])
-fig_km.savefig(out_dir / "km_components.png", dpi=150)
-plt.close(fig_km)
-print(f"  Saved km_components.png")
+for key, fname in [("drift", "km_components_drift.png"),
+                   ("diffusion", "km_components_diffusion.png")]:
+    fig_km = figs_km.get(key)
+    if fig_km is None:
+        continue
+    fig_km.suptitle("...", fontsize=14)
+    fig_km.tight_layout(rect=[0, 0, 1, 0.95])
+    fig_km.savefig(out_dir / fname, dpi=150)
+    plt.close(fig_km)
+print(f"  Saved km components figures: km_components_drift.png, km_components_diffusion.png")
 
 # ================================================================
 # 6. RECONSTRUIR POTENCIAL 1D (cortes via IgA)
@@ -248,6 +255,7 @@ result_iga = reconstruct_potential(
     return_full=True,
     degree=config['degree'],
     decompose_helmholtz=True,
+    compute_stream_function=True,  # NUEVO: ψ, g_recon = ∇U + ∇⊥ψ y v = f + D·∇U
     density_threshold=0.01,
     rtol=1e-6,
     atol=1e-12
@@ -300,6 +308,9 @@ if D == 2:
         align_minima=False,
         align_to_zero=False,
         crop_to_valid = True,
+        stream_function=result_iga.get('stream_function'),        # NUEVO
+        reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
+        reconstructed_drift=result_iga.get('reconstructed_drift'),  # NUEVO
         # clip_percentile = 99.9,
     )
     if fig_pot_2d is None:
@@ -325,6 +336,37 @@ if D == 2:
         plt.close(fig_res)
         print("  Saved potential_2d_residual.png")
 
+    # ================================================================
+    # 8b. NUEVOS PLOTS: fuerza no-conservativa v y combinación U + v + ψ
+    # (solo cuando la stream function está disponible, D == 2)
+    # ================================================================
+    if result_iga.get('nonconservative_force') is not None:
+        fig_v = plot_nonconservative_force_2d(
+            result_iga['nonconservative_force'], edges,
+            title=f'Fuerza no-conservativa v = f + D·∇U — {model_name.upper()}',
+            crop_to_valid=True,
+            skip = 4
+        )
+        fig_v.savefig(out_dir / "potential_2d_nonconservative_force.png", dpi=150)
+        plt.close(fig_v)
+        print("  Saved potential_2d_nonconservative_force.png")
+
+    if (result_iga.get('reconstructed_field') is not None
+            or result_iga.get('nonconservative_force') is not None):
+        fig_comb = plot_potential_combined_2d(
+            U_rec, edges,
+            stream_function=result_iga.get('stream_function'),
+            nonconservative_force=result_iga.get('nonconservative_force'),
+            reconstructed_field=result_iga.get('reconstructed_field'),
+            reconstructed_drift=result_iga.get('reconstructed_drift'),
+            title=f'{model_name.upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)',
+            crop_to_valid=True,
+            skip=4
+        )
+        fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
+        plt.close(fig_comb)
+        print("  Saved potential_2d_combined.png")
+
 elif D >= 3:
     # Para D>=3, plotear cortes 2D seleccionando pares de dimensiones
     from src.potential_reconstruction.km_tools_v2 import plot_potential_slice
@@ -341,7 +383,10 @@ elif D >= 3:
             figsize=(12, 5),
             unify_colorbar=False,
             align_minima=False,
-            align_to_zero=False
+            align_to_zero=False,
+            stream_function=result_iga.get('stream_function'),        # NUEVO
+            reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
+            reconstructed_drift=result_iga.get('reconstructed_drift'),# NUEVO
         )
         if fig_slice is None:
                 fig_slice = plt.gcf()
