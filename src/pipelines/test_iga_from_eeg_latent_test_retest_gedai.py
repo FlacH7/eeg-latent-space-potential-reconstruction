@@ -107,7 +107,8 @@ def _parse_args() -> argparse.Namespace:
                         help="Dimensionality of the latent subspace (default: 2)")
     parser.add_argument("--scoring-method", type=str, default="hankel_dmd",
                         choices=["markov", "conservative", "weighted",
-                                 "sequential", "pareto", "independent", "hankel_dmd"],
+                                 "sequential", "pareto", "independent",
+                                 "hankel_dmd", "diffusion_maps"],
                         help="Subspace selection strategy (default: hankel_dmd)")
     parser.add_argument("--fc-metric", type=str, default="variance_sum",
                         choices=["variance_sum", "first_pc_var", "total_variance"])
@@ -126,6 +127,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--h-freq", type=float, default=40.0)
     parser.add_argument("--ica-method", type=str, default="picard")
     parser.add_argument("--verbose", action="store_true", default=True)
+    # ---- Diffusion Maps params ----
+    parser.add_argument(
+        "--diffusion-sigma", type=float, default=None,
+        help=("Sigma for Diffusion Maps Gaussian kernel. "
+              "If None, auto-computed via bgh method (Berry-Giannakis-Harlim).")
+    )
+    parser.add_argument(
+        "--diffusion-k", type=int, default=100,
+        help="Number of nearest neighbors for sparse affinity matrix."
+    )
+    parser.add_argument(
+        "--diffusion-time", type=float, default=0.0,
+        help=("Diffusion time t >= 0. Higher values filter fine-scale noise "
+              "and highlight macroscopic dynamics (multiscale filtering).")
+    )
+    parser.add_argument(
+        "--diffusion-alpha", type=float, default=0.5,
+        help=("Density normalization parameter (Coifman-Lafon). "
+              "0.0=Laplacian Eigenmaps, 0.5=Diffusion Maps (default), 1.0=Fokker-Planck.")
+    )
     # ---- Output ----
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory to save plots (default: current)")
@@ -246,7 +267,17 @@ def main() -> int:
             ica_method=args.ica_method,
             n_workers=args.workers,
             verbose=verbose,
+            diffusion_sigma=args.diffusion_sigma,
+            diffusion_k=args.diffusion_k,
+            diffusion_time=args.diffusion_time,
+            diffusion_alpha=args.diffusion_alpha,
         )
+
+        # For diffusion_maps, remove ICA/FC params from metadata to avoid confusion
+        if args.scoring_method == "diffusion_maps":
+            for key in ["fc_metric", "n_bins", "alpha", "search_strategy",
+                        "n_ica_components", "ica_method"]:
+                meta.pop(key, None)
 
         print(f"\n  [CACHE] Saving latent space to: {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -430,7 +461,7 @@ def main() -> int:
     print("  STAGE 5: PLOT KM COMPONENTS")
     print("=" * 70)
 
-    fig_km = plot_km_components(
+    figs_km = plot_km_components(
         drift, diffusion, edges,
         drift_components=config["drift_components"],
         diff_components=config["diff_components"],
@@ -438,14 +469,17 @@ def main() -> int:
         theoretical=None,
         figsize=(12, 8),
     )
-    plt.suptitle(
-        f"{config['model_name'].upper()} -- D^1 and D^2 estimated",
-        fontsize=14,
-    )
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    fig_km.savefig(out_dir / "km_components.png", dpi=150)
-    plt.close(fig_km)
-    print(f"  Saved km_components.png")
+    for key, fname in [("drift", "km_components_drift.png"),
+                   ("diffusion", "km_components_diffusion.png")]:
+        fig_km = figs_km.get(key)
+        if fig_km is None:
+            continue
+        
+        fig_km.suptitle("...", fontsize=14)
+        fig_km.tight_layout(rect=[0, 0, 1, 0.95])
+        fig_km.savefig(out_dir / fname, dpi=150)
+        plt.close(fig_km)
+    print(f"  Saved km components figures: km_components_drift.png, km_components_diffusion.png")
 
     # =====================================================================
     # 9. 1D POTENTIAL RECONSTRUCTION

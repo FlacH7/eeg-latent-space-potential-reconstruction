@@ -11,6 +11,10 @@ Single-call function that runs the complete pipeline:
 entirely and extracts the latent space via delay embedding + Dynamic
 Mode Decomposition.
 
+**New:** Diffusion Maps mode (``scoring_method="diffusion_maps"``) bypasses ICA
+entirely and extracts the latent space via Diffusion Maps (Coifman & Lafon,
+2006) using pyDiffMap, preserving intrinsic geometric connectivity.
+
 Typical usage::
 
     from extract_latent_subspace import extract_latent_space
@@ -35,12 +39,17 @@ Typical usage::
         n_bins=5,
     )
 
-    # Hankel+DMD (no ICA/ICLabel)
+    # Diffusion Maps (no ICA/ICLabel)
     latent, meta = extract_latent_space(
         raw,
-        n_dim=4,
-        scoring_method="hankel_dmd",
-        hankel_embedding_depth=60,
+        n_dim=3,
+        scoring_method="diffusion_maps",
+        diffusion_sigma=0.5,
+        diffusion_k=80,
+        diffusion_time=2.0,
+        diffusion_alpha=0.5,
+        l_freq=1.0,
+        h_freq=40.0,
     )
 
 Return value
@@ -100,6 +109,12 @@ from src.latent_space_extraction.hankel_dmd_extractor import (
     extract_hankel_dmd_latent_space,
 )
 
+# Diffusion Maps latent extractor
+from src.latent_space_extraction.diffusion_maps_extractor import (
+    extract_diffusion_maps_latent_space,
+    nystroem_extension,
+)
+
 
 # ---------------------------------------------------------------------------
 # Default constants
@@ -125,7 +140,7 @@ def extract_latent_space(
     # ---- Scoring method ----
     scoring_method: Literal[
         "markov", "conservative", "weighted", "sequential", "pareto",
-        "independent", "hankel_dmd",
+        "independent", "hankel_dmd", "diffusion_maps",
     ] = "markov",
     # ---- Conservative-fraction params ----
     fc_metric: str = DEFAULT_FC_METRIC,
@@ -138,6 +153,11 @@ def extract_latent_space(
     sequential_K: int | None = None,
     # ---- Hankel+DMD params ----
     hankel_embedding_depth: int | None = None,
+    # ---- Diffusion Maps params ----
+    diffusion_sigma: float | None = None,
+    diffusion_k: int = 100,
+    diffusion_time: float = 0.0,
+    diffusion_alpha: float = 0.5,
     # ---- Preprocessing params ----
     l_freq: float = DEFAULT_L_FREQ,
     h_freq: float = DEFAULT_H_FREQ,
@@ -182,6 +202,16 @@ def extract_latent_space(
           parameter controls the number of retained DMD modes (latent
           rank).  Additional params: *hankel_embedding_depth*.
 
+        * ``"diffusion_maps"`` — **Diffusion Maps** (Coifman & Lafon
+          2006).  Bypasses ICA/ICLabel entirely.  Applies only band-pass
+          filtering, then constructs a Gaussian-kernel affinity graph on
+          time samples (each instant treated as a point in channel space)
+          and extracts the latent space via eigendecomposition of the
+          diffusion operator.  Preserves intrinsic geometric connectivity
+          and linearises the Koopman operator.  Additional params:
+          *diffusion_sigma*, *diffusion_k*, *diffusion_time*,
+          *diffusion_alpha*.
+
     fc_metric : str, default ``"variance_sum"``
         Variance measure for the conservative fraction. One of:
         ``"variance_sum"``, ``"first_pc_var"``, ``"total_variance"``.
@@ -201,6 +231,23 @@ def extract_latent_space(
         depth (*T*) for the Hankel matrix — number of past snapshots in
         the delay vector.  ``None`` auto-computes from the sampling rate
         (rule of thumb: ``T = clip(sfreq * 0.25, 50, 200)``).
+    diffusion_sigma : float or None, optional
+        **Only used when** ``scoring_method="diffusion_maps"``.  Bandwidth
+        sigma of the Gaussian kernel.  ``None`` triggers automatic
+        estimation via the Berry-Giannakis-Harlim method (``bgh``).
+    diffusion_k : int, default 100
+        **Only used when** ``scoring_method="diffusion_maps"``.  Number of
+        nearest neighbours for the sparse affinity matrix.
+    diffusion_time : float, default 0.0
+        **Only used when** ``scoring_method="diffusion_maps"``.  Diffusion
+        time *t* >= 0.  Larger values filter fine-scale noise and
+        highlight macroscopic brain-state dynamics.  ``0.0`` = no
+        eigenvalue filtering (raw eigenvectors).
+    diffusion_alpha : float, default 0.5
+        **Only used when** ``scoring_method="diffusion_maps"``.  Density-
+        normalisation parameter (Coifman-Lafon): ``0.0`` = Laplacian
+        Eigenmaps, ``0.5`` = classical Diffusion Maps, ``1.0`` =
+        Fokker-Planck.
     l_freq : float, default 1.0
         High-pass filter cutoff (Hz).
     h_freq : float, default 40.0
@@ -267,6 +314,23 @@ def extract_latent_space(
             raw=raw,
             n_dim=n_dim,
             hankel_embedding_depth=hankel_embedding_depth,
+            l_freq=l_freq,
+            h_freq=h_freq,
+            verbose=verbose,
+            t0=t0,
+        )
+
+    # =====================================================================
+    # Diffusion Maps branch — bypasses ICA/ICLabel entirely
+    # =====================================================================
+    if scoring_method == "diffusion_maps":
+        return _extract_diffusion_maps_branch(
+            raw=raw,
+            n_dim=n_dim,
+            sigma=diffusion_sigma,
+            k=diffusion_k,
+            diffusion_time=diffusion_time,
+            alpha=diffusion_alpha,
             l_freq=l_freq,
             h_freq=h_freq,
             verbose=verbose,
@@ -416,6 +480,84 @@ def _extract_hankel_dmd_branch(
           f"{[f'{f:.3f}' for f in meta_hankel['latent_scores']['frequencies_hz']]}")
 
     return latent, meta_hankel
+
+
+def _extract_diffusion_maps_branch(
+    raw: mne.io.Raw,
+    *,
+    n_dim: int,
+    sigma: float | None,
+    k: int,
+    diffusion_time: float,
+    alpha: float,
+    l_freq: float,
+    h_freq: float,
+    verbose: bool | str | None,
+    t0: float,
+) -> tuple[np.ndarray, dict]:
+    """
+    Execute the Diffusion Maps branch of the pipeline.
+
+    This bypasses ICA decomposition and ICLabel artifact rejection.
+    Only band-pass filtering is applied, then the Diffusion Maps module
+    extracts the latent space directly from the filtered channel data.
+    """
+    print(f"\n[Diffusion Maps] Bypassing ICA/ICLabel — using Diffusion Maps (pyDiffMap)")
+    print(f"[Diffusion Maps] Filter: {l_freq}-{h_freq} Hz | n_dim={n_dim} | "
+          f"sigma={'auto(bgh)' if sigma is None else sigma} | k={k} | "
+          f"t={diffusion_time} | alpha={alpha}")
+
+    # 1. Apply only band-pass filtering, get data matrix
+    X, raw_filtered, sfreq = extract_filtered_data_matrix(
+        raw,
+        l_freq=l_freq,
+        h_freq=h_freq,
+        verbose=verbose,
+    )
+
+    n_ch, n_times = X.shape
+    print(f"[Diffusion Maps] Channels: {n_ch} | Time samples: {n_times} | sfreq: {sfreq:.1f} Hz")
+
+    # 2. Run Diffusion Maps
+    latent, dm_meta = extract_diffusion_maps_latent_space(
+        X=X,
+        n_dim=n_dim,
+        sigma=sigma,
+        k=k,
+        diffusion_time=diffusion_time,
+        alpha=alpha,
+        sfreq=sfreq,
+    )
+
+    # 3. Build pipeline-compatible metadata dict
+    meta = {
+        "selected_indices": list(range(n_dim)),
+        "scoring_method": "diffusion_maps",
+        "latent_scores": {
+            "eigenvalues": dm_meta.get("eigenvalues_latent", []),
+            "all_eigenvalues": dm_meta.get("eigenvalues", []),
+            "sigma_used": dm_meta.get("sigma_used"),
+            "epsilon_fitted": dm_meta.get("epsilon_fitted"),
+            "k_neighbors": dm_meta.get("k_neighbors"),
+            "diffusion_time": dm_meta.get("diffusion_time"),
+            "alpha": dm_meta.get("alpha"),
+            "spectral_gap": dm_meta.get("spectral_gap"),
+        },
+        "preprocessing": {
+            "l_freq": l_freq,
+            "h_freq": h_freq,
+            "sfreq": sfreq,
+        },
+        "elapsed_time": time.time() - t0,
+        "diffusion_maps_meta": dm_meta,
+    }
+
+    print(f"[Diffusion Maps] Latent shape: {latent.shape}")
+    print(f"[Diffusion Maps] Spectral gap: {dm_meta.get('spectral_gap')}")
+    print(f"[Diffusion Maps] Sigma used: {dm_meta.get('sigma_used')}")
+    print(f"[Diffusion Maps] Completed in {meta['elapsed_time']:.2f}s")
+
+    return latent, meta
 
 
 # ---------------------------------------------------------------------------
