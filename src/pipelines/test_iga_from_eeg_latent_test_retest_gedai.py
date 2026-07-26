@@ -378,10 +378,10 @@ def main() -> int:
     config.update({
         "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{args.scoring_method}",
         "D": D,
-        "bins": [50] * D,
+        "bins": [40] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
-        "degree": 3,
+        "degree": 2,
     })
     print(f"\n  KM config: {config}")
 
