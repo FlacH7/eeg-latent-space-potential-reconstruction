@@ -139,7 +139,7 @@ def extract_latent_space(
     n_dim: int = 2,
     # ---- Scoring method ----
     scoring_method: Literal[
-        "markov", "conservative", "weighted", "sequential", "pareto",
+        "markov","markov_inverted", "conservative", "weighted", "sequential", "pareto",
         "independent", "hankel_dmd", "diffusion_maps",
     ] = "markov",
     # ---- Conservative-fraction params ----
@@ -185,6 +185,8 @@ def extract_latent_space(
 
         * ``"markov"``       — minimise Markov relaxation time (fastest
           dynamics). Recommended based on empirical results.
+        * ``"markov_inverted"`` — maximise Markov relaxation time (slowest
+          dynamics).
         * ``"conservative"`` — maximise conservative fraction (variance
           retention). Falls back to greedy when ``n_dim >= 4``.
         * ``"weighted"``     — convex combination of normalised fc and
@@ -366,7 +368,12 @@ def extract_latent_space(
         selected_idx, meta_scores = _select_markov(
             Y, n_dim, n_bins, use_greedy, n_workers
         )
-
+        
+    elif scoring_method == "markov_inverted":
+        selected_idx, meta_scores = _select_markov(
+            Y, n_dim, n_bins, use_greedy, n_workers, maximize=True
+        )
+    
     elif scoring_method == "conservative":
         selected_idx, meta_scores = _select_conservative(
             Y, n_dim, fc_metric, use_greedy, n_workers
@@ -664,14 +671,15 @@ def _select_markov(
     n_bins: int,
     use_greedy: bool,
     n_workers: int | None,
+    maximize: bool = False,
 ) -> tuple[tuple[int, ...], dict]:
     """Select subspace by minimising Markov relaxation time."""
     if use_greedy:
-        comb, tau = greedy_forward_selection_markov(Y, n_dim, n_bins=n_bins)
+        comb, tau = greedy_forward_selection_markov(Y, n_dim, n_bins=n_bins, maximize=maximize)
         comb = tuple(comb)
     else:
         comb, tau = find_best_subspace_markov(
-            Y, n_dim, n_bins=n_bins, n_workers=n_workers
+            Y, n_dim, n_bins=n_bins, n_workers=n_workers, maximize=maximize
         )
     return comb, {"tau": float(tau), "search": "greedy" if use_greedy else "exhaustive"}
 

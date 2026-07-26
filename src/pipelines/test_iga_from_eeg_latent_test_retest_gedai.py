@@ -106,7 +106,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-dim", type=int, default=2,
                         help="Dimensionality of the latent subspace (default: 2)")
     parser.add_argument("--scoring-method", type=str, default="hankel_dmd",
-                        choices=["markov", "conservative", "weighted",
+                        choices=["markov", "markov_inverted", "conservative", "weighted",
                                  "sequential", "pareto", "independent",
                                  "hankel_dmd", "diffusion_maps"],
                         help="Subspace selection strategy (default: hankel_dmd)")
@@ -593,6 +593,7 @@ def main() -> int:
             align_minima=True,
             align_to_zero=True,
             crop_to_valid=True,
+            show_streamlines=False,
             stream_function=result_iga.get('stream_function'),        # NUEVO
             reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
         )
@@ -601,6 +602,24 @@ def main() -> int:
         fig_pot_2d.savefig(out_dir / "potential_2d.png", dpi=150)
         plt.close(fig_pot_2d)
         print("  Saved potential_2d.png")
+        
+        ### Lo mismo pero con streamlines y fuerza no-conservativa (si están disponibles)
+        fig_pot_2d = plot_potential_2d(
+            U_rec, edges,
+            title_est=f"{config['model_name'].upper()} -- Reconstructed",
+            figsize=(12, 5),
+            unify_colorbar=True,
+            align_minima=True,
+            align_to_zero=True,
+            crop_to_valid=True,
+            stream_function=result_iga.get('stream_function'),        # NUEVO
+            reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
+        )
+        if fig_pot_2d is None:
+            fig_pot_2d = plt.gcf()
+        fig_pot_2d.savefig(out_dir / "potential_2d_streamlines.png", dpi=150)
+        plt.close(fig_pot_2d)
+        print("  Saved potential_2d_streamlines.png")
 
         if "residual" in result_iga:
             residual = result_iga["residual"]

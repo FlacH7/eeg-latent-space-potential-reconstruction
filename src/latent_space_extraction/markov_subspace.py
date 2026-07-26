@@ -205,6 +205,7 @@ def find_best_subspace_markov(
     n_bins: int = 5,
     n_workers: int | None = None,
     show_progress: bool = True,
+    maximize: bool = False,
 ) -> tuple[tuple[int, ...] | None, float]:
     """
     Exhaustively search for the N-component subspace with the *smallest*
@@ -276,13 +277,20 @@ def find_best_subspace_markov(
     print(f"[MarkovTime] Done in {elapsed:.2f} s.")
 
     best_comb: tuple[int, ...] | None = None
-    best_tau = np.inf
+    best_tau = -np.inf if maximize else np.inf
 
     for comb, tau in results:
-        if tau < best_tau:
-            best_tau = tau
-            best_comb = comb
-
+        if maximize:
+            if np.isfinite(tau) and tau > best_tau:
+                best_tau = tau
+                best_comb = comb
+        else:
+            if tau < best_tau:
+                best_tau = tau
+                best_comb = comb
+    if maximize and best_comb is None:
+        best_tau = np.inf  # No valid subspace found
+        
     return best_comb, float(best_tau)
 
 
@@ -295,6 +303,7 @@ def greedy_forward_selection_markov(
     N: int,
     *,
     n_bins: int = 5,
+    maximize: bool = False,
 ) -> tuple[list[int], float]:
     """
     Greedy forward selection for the Markov-time criterion.
@@ -310,7 +319,7 @@ def greedy_forward_selection_markov(
         Target subspace dimensionality.
     n_bins : int, default 5
         Number of quantile bins per component.
-
+    maximize : bool, default False
     Returns
     -------
     selected : list[int]
@@ -328,13 +337,18 @@ def greedy_forward_selection_markov(
 
     for _ in range(N):
         best_idx = -1
-        best_tau = np.inf
+        best_tau = -np.inf if maximize else np.inf
         for idx in remaining:
             trial = tuple(selected + [idx])
             _, tau = evaluate_markov_combination(trial, bins_idx, n_bins)
-            if tau < best_tau:
-                best_tau = tau
-                best_idx = idx
+            if maximize:
+                if np.isfinite(tau) and tau > best_tau:
+                    best_tau = tau
+                    best_idx = idx
+            else:
+                if tau < best_tau:
+                    best_tau = tau
+                    best_idx = idx
         selected.append(best_idx)
         remaining.remove(best_idx)
 
