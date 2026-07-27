@@ -2,91 +2,67 @@
 """
 run_batch_multi_method.py
 ===========================
-Ejecutor de batch multi-método para el pipeline IgA sobre el dataset
+Ejecutor de batch multi-metodo para el pipeline IgA sobre el dataset
 test-retest preprocesado con **Gedai** (formato EEGLAB .set/.fdt).
 
 A diferencia de ``run_batch_iga_test_retest_gedai.py``, este script:
 
-1. **Itera sobre múltiples scoring-methods** en cada corrida (por defecto
+1. **Itera sobre multiples scoring-methods** en cada corrida (por defecto
    markov, markov_inverted, hankel_dmd, diffusion_maps), generando un
-   resultado independiente por método.
+   resultado independiente por metodo.
 
 2. **Permite parametrizar** el rango de sujetos, las sesiones a procesar,
-   las tareas y los métodos, haciéndolo escalable.
+   las tareas y los metodos, haciendolo escalable.
 
-3. **Post-procesamiento automático**: al finalizar todas las corridas,
-   genera gráficos compuestos de 2 filas × N columnas por cada
-   (sujeto, sesión, tarea), donde:
-   - Cada **columna** corresponde a un método.
+3. **Post-procesamiento automatico**: al finalizar todas las corridas,
+   genera graficos compuestos de 2 filas x N columnas por cada
+   (sujeto, sesion, tarea), donde:
+   - Cada **columna** corresponde a un metodo.
    - La **fila 1** muestra el potencial 2D (``potential_2d.png``).
    - La **fila 2** muestra la fuerza no-conservativa / rotacional
      (``potential_2d_nonconservative_force.png``).
 
-Configuración
+   Los graficos se nombran dinamicamente incluyendo sujeto, sesion y tarea:
+   ``methods_comparison_{subject}_{session}_{task}.png``
+
+Configuracion
 --------------
 Todo se controla mediante variables de entorno (o los defaults del script):
 
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| Variable de entorno                      | Default                   | Descripción                                      |
-+==========================================+===========================+==================================================+
-| ``BATCH_MM_PARAMS_FILE``                 | (ninguno)                 | Archivo .txt/.csv de parámetros. Si se da, se    |
-|                                          |                           | usa en lugar de la generación automática.        |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_SUBJ_START``                  | ``1``                     | Índice inicial de sujeto (sub-01, sub-02, …).    |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_SUBJ_END``                    | ``5``                     | Índice final de sujeto (inclusive).              |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_SESSIONS``                    | ``["session1"]``          | Lista JSON de sesiones a procesar.               |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_TASKS``                       | ``["eyesclosed", ...]``   | Lista JSON de tareas. Si vacío, usa las 5 por    |
-|                                          |                           | defecto.                                         |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_METHODS``                     | ``["markov", ...]``       | Lista JSON de scoring-methods.                   |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_T_START``                     | ``0.0``                   | Inicio de la ventana temporal (s).               |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_T_END``                       | ``300.0``                 | Fin de la ventana temporal (s).                  |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_DB_PATH``                     | ``DB_TEST_RETEST_GEDAI_PATH`` | Ruta a la base de datos Gedai.                |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_OUTPUT_DIR``                  | ``BASE_RESULTS_PATH``     | Directorio base de resultados.                   |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_CACHE_DIR``                   | ``BASE_CACHE_PATH``       | Directorio base de caché.                        |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_LATENT_DIM``                  | ``2``                     | Dimensión del espacio latente.                   |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_ICA_METHOD``                  | ``picard``                | Método ICA.                                      |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_L_FREQ`` / ``BATCH_MM_H_FREQ``| ``1.0`` / ``40.0``       | Frecuencias de filtro.                          |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_MAX_WORKERS``                 | ``1``                     | Workers paralelos (1 = secuencial).              |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_DELAY``                       | ``2.0``                   | Pausa entre ejecuciones (solo secuencial).       |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_IGNORE_CACHE``                | ``false``                 | Forzar recálculo del espacio latente.            |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_RUN_POSTPROCESS``             | ``true``                  | Ejecutar post-proc de gráficos compuestos.       |
-+------------------------------------------+---------------------------+--------------------------------------------------+
-| ``BATCH_MM_LOG_LEVEL``                   | ``INFO``                  | Nivel de logging.                                |
-+------------------------------------------+---------------------------+--------------------------------------------------+
+BATCH_MM_PARAMS_FILE     : Archivo .txt/.csv de parametros externo.
+BATCH_MM_SUBJ_START      : Indice inicial de sujeto (default: 1)
+BATCH_MM_SUBJ_END        : Indice final de sujeto inclusive (default: 5)
+BATCH_MM_SESSIONS        : Lista JSON de sesiones (default: ["session1"])
+BATCH_MM_TASKS           : Lista JSON de tareas (default: las 5)
+BATCH_MM_METHODS         : Lista JSON de metodos (default: los 4)
+BATCH_MM_T_START/T_END   : Ventana temporal (default: 0.0 / 300.0)
+BATCH_MM_DB_PATH         : Ruta a la base de datos Gedai
+BATCH_MM_OUTPUT_DIR      : Directorio base de resultados
+BATCH_MM_CACHE_DIR       : Directorio base de cache
+BATCH_MM_LATENT_DIM      : Dimension del espacio latente (default: 2)
+BATCH_MM_ICA_METHOD      : Metodo ICA (default: picard)
+BATCH_MM_L_FREQ/H_FREQ   : Frecuencias de filtro (default: 1.0 / 40.0)
+BATCH_MM_MAX_WORKERS     : Workers paralelos (default: 1, secuencial)
+BATCH_MM_DELAY           : Pausa entre ejecuciones (default: 2.0 s)
+BATCH_MM_IGNORE_CACHE    : Forzar recalculo (default: false)
+BATCH_MM_RUN_POSTPROCESS : Ejecutar post-proc (default: true)
+BATCH_MM_LOG_LEVEL       : Nivel de logging (default: INFO)
 
 Uso
 ---
-Desde la raíz del proyecto::
+Desde la raiz del proyecto::
 
-    # Usando defaults (sub-01..sub-05, session1, 4 métodos, 5 tareas → 100 runs)
+    # Usando defaults (sub-01..sub-05, session1, 4 metodos, 5 tareas -> 100 runs)
     python -m src.batch_runs.run_batch_multi_method
 
-    # Personalizando vía entorno
+    # Personalizando via entorno
     export BATCH_MM_SUBJ_END=10
     export BATCH_MM_METHODS='["markov", "hankel_dmd"]'
     python -m src.batch_runs.run_batch_multi_method
 
-    # Usando archivo de parámetros externo (comportamiento clásico)
+    # Usando archivo de parametros externo (comportamiento clasico)
     export BATCH_MM_PARAMS_FILE=/ruta/a/mis_params.txt
     python -m src.batch_runs.run_batch_multi_method
-
-Autor: Generado para el pipeline IgA multi-método.
 """
 
 from __future__ import annotations
@@ -104,13 +80,12 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-import numpy as np
 
 # ---------------------------------------------------------------------------
 # Asegurar importabilidad del paquete
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _SCRIPT_DIR.parent.parent  # batch_runs/ -> src/ -> raíz
+_PROJECT_ROOT = _SCRIPT_DIR.parent.parent  # batch_runs/ -> src/ -> raiz
 
 for _p in (_PROJECT_ROOT, _PROJECT_ROOT / "src"):
     if str(_p) not in sys.path:
@@ -130,15 +105,15 @@ try:
     )
 except ImportError as _exc:
     print(
-        f"[ERROR] No se pudieron importar los módulos del proyecto. "
-        f"Asegúrate de ejecutar este script desde la raíz del repositorio "
-        f"o de que 'src' esté en PYTHONPATH.\n{_exc}",
+        f"[ERROR] No se pudieron importar los modulos del proyecto. "
+        f"Asegurate de ejecutar este script desde la raiz del repositorio "
+        f"o de que 'src' este en PYTHONPATH.\n{_exc}",
         file=sys.stderr,
     )
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# Configuración de logging
+# Configuracion de logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=LOGGING_LEVEL.upper(),
@@ -151,7 +126,7 @@ logging_path = (
     Path(LOGGING_BASE_PATH + "/batch_multi_method") if LOGGING_BASE_PATH else None
 )
 if not logging_path:
-    logger.warning("No se definió LOGGING_BASE_PATH; logs no se guardarán en archivo.")
+    logger.warning("No se definio LOGGING_BASE_PATH; logs no se guardaran en archivo.")
 else:
     os.makedirs(logging_path, exist_ok=True)
 
@@ -206,14 +181,14 @@ def _env_json_list(var: str, default: list) -> list:
 
 
 # ===========================================================================
-# CONFIGURACIÓN GLOBAL
+# CONFIGURACION GLOBAL
 # ===========================================================================
 
 # --- Rango de sujetos (parametrizable) ---
 SUBJ_START: int = _env_int("BATCH_MM_SUBJ_START", 1)
 SUBJ_END: int = _env_int("BATCH_MM_SUBJ_END", 5)
 
-# --- Sesiones, tareas y métodos (parametrizable vía JSON en env) ---
+# --- Sesiones, tareas y metodos (parametrizable via JSON en env) ---
 SESSIONS: list[str] = _env_json_list("BATCH_MM_SESSIONS", DEFAULT_SESSIONS)
 TASKS: list[str] = _env_json_list("BATCH_MM_TASKS", DEFAULT_TASKS)
 METHODS: list[str] = _env_json_list("BATCH_MM_METHODS", DEFAULT_METHODS)
@@ -222,7 +197,7 @@ METHODS: list[str] = _env_json_list("BATCH_MM_METHODS", DEFAULT_METHODS)
 T_START: float = _env_float("BATCH_MM_T_START", 0.0)
 T_END: float = _env_float("BATCH_MM_T_END", 300.0)
 
-# --- Parámetros del pipeline ---
+# --- Parametros del pipeline ---
 LATENT_DIM: int = _env_int("BATCH_MM_LATENT_DIM", 2)
 ICA_METHOD: str = _env("BATCH_MM_ICA_METHOD", "picard")
 L_FREQ: float = _env_float("BATCH_MM_L_FREQ", 1.0)
@@ -236,7 +211,7 @@ DB_PATH: Path = Path(_env("BATCH_MM_DB_PATH", DB_TEST_RETEST_GEDAI_PATH))
 OUTPUT_DIR: Path = Path(_env("BATCH_MM_OUTPUT_DIR", BASE_RESULTS_PATH))
 CACHE_DIR: Path = Path(_env("BATCH_MM_CACHE_DIR", BASE_CACHE_PATH))
 
-# --- Ejecución ---
+# --- Ejecucion ---
 DELAY: float = _env_float("BATCH_MM_DELAY", 2.0)
 IGNORE_CACHE: bool = _env_bool("BATCH_MM_IGNORE_CACHE", False)
 RUN_POSTPROCESS: bool = _env_bool("BATCH_MM_RUN_POSTPROCESS", True)
@@ -253,19 +228,19 @@ _PIPELINE_OUT_SUBPATH = "test_retest_gedai"
 # --- Archivos de imagen para el post-procesamiento ---
 POTENTIAL_IMG = "potential_2d.png"
 NONCONS_IMG = "potential_2d_nonconservative_force.png"
-COMPOSITE_FILENAME = "methods_comparison_potential_rotational.png"
+COMPOSITE_PREFIX = "methods_comparison"
 
 # --- Checkpoint ---
-CHECKPOINT_FILE: Path = CACHE_DIR / f"batch_checkpoint_multi_method.json"
+CHECKPOINT_FILE: Path = CACHE_DIR / "batch_checkpoint_multi_method.json"
 
 
 # ===========================================================================
-# GENERACIÓN DE JOBS
+# GENERACION DE JOBS
 # ===========================================================================
 
 
 def _generate_jobs_from_params() -> list[dict]:
-    """Genera la lista de jobs a partir de los parámetros escalables.
+    """Genera la lista de jobs a partir de los parametros escalables.
 
     Cada job es un dict con:
         subject, session, task, method, t_start, t_end
@@ -288,7 +263,7 @@ def _generate_jobs_from_params() -> list[dict]:
 
 
 def _generate_jobs_from_file(filepath: Path) -> list[dict]:
-    """Lee jobs desde un archivo de parámetros y los combina con cada método.
+    """Lee jobs desde un archivo de parametros y los combina con cada metodo.
 
     El archivo tiene el formato original:
         ['sub-01', 'session1_eyesclosed', '0.00', '300.00', 'eyesclosed']
@@ -340,7 +315,7 @@ def _generate_jobs_from_file(filepath: Path) -> list[dict]:
 
 
 class MultiMethodBatchRunner:
-    """Orquesta la ejecución multi-método del pipeline IgA."""
+    """Orquesta la ejecucion multi-metodo del pipeline IgA."""
 
     CSV_FIELDS = [
         "timestamp", "subject", "session", "task", "method",
@@ -350,17 +325,17 @@ class MultiMethodBatchRunner:
     def __init__(self) -> None:
         # --- Validaciones ---
         if PARAMS_FILE is not None and not PARAMS_FILE.exists():
-            logger.error("Archivo de parámetros no encontrado: %s", PARAMS_FILE)
+            logger.error("Archivo de parametros no encontrado: %s", PARAMS_FILE)
             sys.exit(1)
         if not _PROJECT_ROOT.exists():
-            logger.error("Raíz del proyecto no encontrada: %s", _PROJECT_ROOT)
+            logger.error("Raiz del proyecto no encontrada: %s", _PROJECT_ROOT)
             sys.exit(1)
         if not DB_PATH.exists():
             logger.warning("Ruta de test-retest Gedai no encontrada: %s", DB_PATH)
 
         self.checkpoint: set[str] = self._load_checkpoint()
 
-        ts = datetime.now().strftime("Y%m%d_%H%M%S")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = logging_path / f"batch_log_multi_method_{ts}.csv"
         self._init_csv_log()
 
@@ -369,7 +344,7 @@ class MultiMethodBatchRunner:
             logger.info("Generando jobs desde archivo: %s", PARAMS_FILE)
             self.all_jobs = _generate_jobs_from_file(PARAMS_FILE)
         else:
-            logger.info("Generando jobs desde parámetros escalables")
+            logger.info("Generando jobs desde parametros escalables")
             self.all_jobs = _generate_jobs_from_params()
 
         self._print_banner()
@@ -400,7 +375,7 @@ class MultiMethodBatchRunner:
         logger.info("  Methods     : %s", METHODS)
         logger.info("  Time window : %.1f s -> %.1f s", T_START, T_END)
         logger.info("  ---")
-        logger.info("  Total jobs  : %d (%d subj × %d sess × %d task × %d meth)",
+        logger.info("  Total jobs  : %d (%d subj x %d sess x %d task x %d meth)",
                     len(self.all_jobs), n_subjects, n_sessions, n_tasks, n_methods)
         logger.info("  Delay       : %.1f s", DELAY)
         logger.info("  Ignore cache: %s", IGNORE_CACHE)
@@ -515,20 +490,21 @@ class MultiMethodBatchRunner:
     def _get_output_dir(job: dict) -> Path:
         """Devuelve el directorio de salida donde el pipeline guarda sus resultados.
 
-        Mismo patrón que ``test_iga_from_eeg_latent_test_retest_gedai.py``:
+        Mismo patron que ``test_iga_from_eeg_latent_test_retest_gedai.py``:
         ``test_retest_gedai/{subject}/{session}/{latent_dim}_latent_dim_{method}/from{t_start}s_to_{t_end}s_{task}``
         """
+        method = job["method"]
         return (
             OUTPUT_DIR
             / _PIPELINE_OUT_SUBPATH
             / job["subject"]
             / job["session"]
-            / f"{LATENT_DIM}_latent_dim_{job["method"]}"
-            / f"from{job["t_start"]}s_to_{job["t_end"]}s_{job["task"]}"
+            / f"{LATENT_DIM}_latent_dim_{method}"
+            / f"from{job['t_start']}s_to_{job['t_end']}s_{job['task']}"
         )
 
     # ------------------------------------------------------------------
-    # Construcción del comando
+    # Construccion del comando
     # ------------------------------------------------------------------
 
     def _build_command(self, job: dict) -> list[str]:
@@ -551,7 +527,7 @@ class MultiMethodBatchRunner:
         return cmd
 
     # ------------------------------------------------------------------
-    # Ejecución de un job individual
+    # Ejecucion de un job individual
     # ------------------------------------------------------------------
 
     def _run_single_job(self, job: dict) -> tuple[str, bool]:
@@ -564,7 +540,7 @@ class MultiMethodBatchRunner:
             cmd = self._build_command(job)
         except FileNotFoundError as exc:
             logger.error(
-                "No se encontró .set para %s/%s/%s [%s]: %s",
+                "No se encontro .set para %s/%s/%s [%s]: %s",
                 job["subject"], job["session"], job["task"], job["method"], exc,
             )
             return key, False
@@ -604,7 +580,7 @@ class MultiMethodBatchRunner:
                 )
             else:
                 logger.error(
-                    "ERROR | %s/%s/%s [%s] -- código %d",
+                    "ERROR | %s/%s/%s [%s] -- codigo %d",
                     job["subject"], job["session"], job["task"],
                     job["method"], proc.returncode,
                 )
@@ -622,15 +598,18 @@ class MultiMethodBatchRunner:
             return key, False
 
     # ------------------------------------------------------------------
-    # Post-procesamiento: gráficos compuestos 2×N
+    # Post-procesamiento: graficos compuestos 2xN
     # ------------------------------------------------------------------
 
     def _run_postprocessing(self) -> None:
-        """Genera gráficos compuestos por (sujeto, sesión, tarea).
+        """Genera graficos compuestos por (sujeto, sesion, tarea).
 
-        Layout: 2 filas × N columnas (N = número de métodos)
+        Layout: 2 filas x N columnas (N = numero de metodos)
           - Fila 0: potencial 2D (potential_2d.png)
           - Fila 1: fuerza no-conservativa / rotacional (potential_2d_nonconservative_force.png)
+
+        El nombre del archivo incluye sujeto, sesion y tarea para unicidad:
+          methods_comparison_{subject}_{session}_{task}.png
         """
         import matplotlib
         matplotlib.use("Agg")
@@ -639,7 +618,7 @@ class MultiMethodBatchRunner:
 
         logger.info("")
         logger.info("=" * 70)
-        logger.info("  INICIANDO POST-PROCESAMIENTO: GRÁFICOS COMPUESTOS")
+        logger.info("  INICIANDO POST-PROCESAMIENTO: GRAFICOS COMPUESTOS")
         logger.info("=" * 70)
 
         # Agrupar jobs por (subject, session, task)
@@ -666,12 +645,11 @@ class MultiMethodBatchRunner:
                 constrained_layout=True,
             )
 
-            # Si solo hay 1 método, asegurarse de que axes sea 2D
+            # Si solo hay 1 metodo, asegurarse de que axes sea 2D
             if n_methods == 1:
-                axes = axes[:, np.newaxis] if hasattr(axes, 'shape') and axes.ndim == 1 else axes.reshape(2, 1)
+                axes = axes.reshape(2, 1)
 
             row_labels = ["Potential (U)", "Non-conservative force (v)"]
-            found_any = False
             n_found = 0
 
             for col_idx, job in enumerate(jobs):
@@ -687,7 +665,6 @@ class MultiMethodBatchRunner:
                         axes[0, col_idx].set_title(f"{method}", fontsize=11, fontweight="bold")
                         axes[0, col_idx].axis("off")
                         n_found += 1
-                        found_any = True
                     except Exception as exc:
                         logger.warning("  No se pudo cargar %s: %s", pot_path, exc)
                         axes[0, col_idx].text(
@@ -714,7 +691,7 @@ class MultiMethodBatchRunner:
                         img = Image.open(ncf_path)
                         axes[1, col_idx].imshow(img)
                         axes[1, col_idx].axis("off")
-                        found_any = True
+                        n_found += 1
                     except Exception as exc:
                         logger.warning("  No se pudo cargar %s: %s", ncf_path, exc)
                         axes[1, col_idx].text(
@@ -737,17 +714,16 @@ class MultiMethodBatchRunner:
                 axes[row_idx, 0].set_ylabel(label, fontsize=12, fontweight="bold",
                                              rotation=90, labelpad=15)
 
-            # --- Título general ---
+            # --- Titulo general ---
             fig.suptitle(
                 f"{subject} | {session} | {task}  --  Methods comparison",
                 fontsize=14, fontweight="bold", y=1.01,
             )
 
-            # --- Guardar ---
-            # Se guarda al nivel de task: en el directorio del primer método
-            # encontrado, o en un directorio dedicado si no hay ninguno
+            # --- Guardar con nombre dinamico ---
             save_dir = self._get_output_dir(jobs[0]).parent
-            save_path = save_dir / COMPOSITE_FILENAME
+            composite_name = f"{COMPOSITE_PREFIX}_{subject}_{session}_{task}.png"
+            save_path = save_dir / composite_name
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -761,24 +737,26 @@ class MultiMethodBatchRunner:
                 plt.close(fig)
 
             # Conteo parcial
+            expected_images = 2 * n_methods
             if n_found == 0:
                 missing += 1
-            elif n_found < 2 * n_methods:
+            elif n_found < expected_images:
                 partial += 1
 
         # --- Resumen ---
+        complete = generated - partial - missing
         logger.info("")
         logger.info("=" * 70)
         logger.info("  POST-PROCESAMIENTO COMPLETADO")
         logger.info("=" * 70)
-        logger.info("  Grupos procesados  : %d", total_groups)
-        logger.info("  Completos (todas img): %d", generated - partial - (generated - generated + missing - missing + partial))
-        logger.info("  Parciales (algunas img): %d", partial)
-        logger.info("  Sin imágenes        : %d", missing)
+        logger.info("  Grupos procesados   : %d", total_groups)
+        logger.info("  Completos           : %d", complete)
+        logger.info("  Parciales           : %d", partial)
+        logger.info("  Sin imagenes        : %d", missing)
         logger.info("  Archivos generados  : %d", generated)
 
     # ------------------------------------------------------------------
-    # Orquestación principal
+    # Orquestacion principal
     # ------------------------------------------------------------------
 
     def run(self) -> int:
@@ -786,14 +764,14 @@ class MultiMethodBatchRunner:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         if not self.all_jobs:
-            logger.error("No se generaron jobs. Revisa la configuración.")
+            logger.error("No se generaron jobs. Revisa la configuracion.")
             return 1
 
         todo = self._filter_todo(self.all_jobs)
         total = len(todo)
 
         if total == 0:
-            logger.info("Todos los jobs ya están completados.")
+            logger.info("Todos los jobs ya estan completados.")
             if RUN_POSTPROCESS:
                 self._run_postprocessing()
             return 0
