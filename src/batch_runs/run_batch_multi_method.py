@@ -213,7 +213,7 @@ CACHE_DIR: Path = Path(_env("BATCH_MM_CACHE_DIR", BASE_CACHE_PATH))
 
 # --- Ejecucion ---
 DELAY: float = _env_float("BATCH_MM_DELAY", 2.0)
-IGNORE_CACHE: bool = _env_bool("BATCH_MM_IGNORE_CACHE", False)
+IGNORE_CACHE: bool = _env_bool("BATCH_MM_IGNORE_CACHE", True)
 RUN_POSTPROCESS: bool = _env_bool("BATCH_MM_RUN_POSTPROCESS", True)
 MAX_WORKERS: int = _env_int("BATCH_MM_MAX_WORKERS", 1)
 
