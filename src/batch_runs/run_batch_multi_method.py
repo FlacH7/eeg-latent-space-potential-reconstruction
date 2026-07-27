@@ -466,15 +466,15 @@ class MultiMethodBatchRunner:
                 )
                 continue
 
-            # Verificar si el directorio de salida ya tiene resultados
-            out_sub = self._get_output_dir(job)
-            if out_sub.exists() and any(out_sub.glob("*.png")):
-                logger.debug(
-                    "SKIP (output exists): %s/%s/%s [%s]",
-                    job["subject"], job["session"], job["task"], job["method"],
-                )
-                self.checkpoint.add(key)
-                continue
+            # # Verificar si el directorio de salida ya tiene resultados
+            # out_sub = self._get_output_dir(job)
+            # if out_sub.exists() and any(out_sub.glob("*.png")):
+            #     logger.debug(
+            #         "SKIP (output exists): %s/%s/%s [%s]",
+            #         job["subject"], job["session"], job["task"], job["method"],
+            #     )
+            #     self.checkpoint.add(key)
+            #     continue
 
             todo.append(job)
 
