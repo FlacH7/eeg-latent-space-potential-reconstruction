@@ -102,6 +102,7 @@ try:
         BASE_PARAMS_FILE,
         LOGGING_BASE_PATH,
         LOGGING_LEVEL,
+        DEFAULT_BATCH_RUNS_WORKERS
     )
 except ImportError as _exc:
     print(
@@ -215,7 +216,7 @@ CACHE_DIR: Path = Path(_env("BATCH_MM_CACHE_DIR", BASE_CACHE_PATH))
 DELAY: float = _env_float("BATCH_MM_DELAY", 2.0)
 IGNORE_CACHE: bool = _env_bool("BATCH_MM_IGNORE_CACHE", True)
 RUN_POSTPROCESS: bool = _env_bool("BATCH_MM_RUN_POSTPROCESS", True)
-MAX_WORKERS: int = _env_int("BATCH_MM_MAX_WORKERS", 1)
+MAX_WORKERS: int = _env_int("BATCH_MM_MAX_WORKERS", DEFAULT_BATCH_RUNS_WORKERS)
 
 # --- Logging ---
 if os.environ.get("BATCH_MM_LOG_LEVEL", LOGGING_LEVEL).upper() == "DEBUG":

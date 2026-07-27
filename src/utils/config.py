@@ -25,6 +25,9 @@ BASE_CACHE_PATH = os.getenv("BASE_CACHE_PATH")
 BASE_RESULTS_PATH = os.getenv("BASE_RESULTS_PATH")
 BASE_PARAMS_FILE = os.getenv("BASE_PARAMS_FILE")
 
+# Batch runs
+DEFAULT_BATCH_RUNS_WORKERS = int(os.getenv("DEFAULT_BATCH_RUNS_WORKERS", 1))
+
 os.makedirs(BASE_CACHE_PATH, exist_ok=True)
 os.makedirs(BASE_RESULTS_PATH, exist_ok=True)
 os.makedirs(BASE_PARAMS_FILE, exist_ok=True)
