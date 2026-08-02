@@ -79,6 +79,17 @@ def _truncated_svd(
     Uses :func:`scipy.sparse.linalg.svds` (memory-friendly for large
     Hankel matrices) and returns the triple ``(U, s, Vh)`` sorted by
     descending singular value.
+
+    Sign convention
+    ---------------
+    Singular vectors are only defined up to a sign, and ``svds`` (ARPACK)
+    starts from a random vector, so the *same* matrix can yield opposite
+    signs across calls/machines.  We canonicalise the sign (the
+    largest-magnitude loading of each left singular vector is forced
+    positive — same convention as sklearn's ``svd_flip``, implemented
+    inline to stay version-agnostic), making the decomposition
+    deterministic run-to-run — important for test-retest reproducibility
+    and cache coherence.
     """
     m, n = A.shape
     max_rank = min(m, n) - 1
@@ -89,7 +100,25 @@ def _truncated_svd(
         )
     U, s, Vh = svds(A.astype(np.float64), k=rank)
     order = np.argsort(s)[::-1]
-    return U[:, order], s[order], Vh[order, :]
+    U, s, Vh = U[:, order], s[order], Vh[order, :]
+    U, Vh = _canonical_svd_sign(U, Vh)
+    return U, s, Vh
+
+
+def _canonical_svd_sign(
+    U: np.ndarray,
+    Vh: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Deterministic sign convention for SVD factors (sklearn ``svd_flip``
+    semantics, u-based): for each component, the loading of largest
+    absolute value in the left singular vector is forced positive, and
+    the matching right singular vector is flipped accordingly.
+    """
+    max_abs_idx = np.argmax(np.abs(U), axis=0)
+    signs = np.sign(U[max_abs_idx, np.arange(U.shape[1])])
+    signs[signs == 0.0] = 1.0
+    return U * signs, Vh * signs[:, np.newaxis]
 
 
 def _resolve_n_components(

@@ -549,12 +549,15 @@ class TestEquivalence:
         assert all(c > 0.999 for c in corr), f"correlations: {corr}"
 
     def test_topn_deterministic(self, raw):
+        """La SVD truncada debe ser determinista (convención de signo
+        canónica vía svd_flip): 3 ejecuciones deben coincidir exactamente."""
         kw = dict(n_dim=2, stage1_embedding=None, stage2_dynamics="pca",
                   stage2_params={"n_components": 5}, stage3_selection="top_n",
                   verbose=False)
         l1, _ = extract_latent_space(raw.copy(), **kw)
-        l2, _ = extract_latent_space(raw.copy(), **kw)
-        np.testing.assert_allclose(l1, l2, rtol=1e-8, atol=1e-12)
+        for _ in range(2):
+            l2, _ = extract_latent_space(raw.copy(), **kw)
+            np.testing.assert_allclose(l1, l2, rtol=1e-8, atol=1e-12)
 
 
 if __name__ == "__main__":
