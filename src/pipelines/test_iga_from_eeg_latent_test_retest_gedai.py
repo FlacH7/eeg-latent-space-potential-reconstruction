@@ -6,23 +6,36 @@ Pipeline de Kramers-Moyal + IgA reconstruction para EEG del dataset
 test-retest preprocesado con **Gedai** (formato EEGLAB .set/.fdt).
 
 Carga un segmento de EEG via ``load_test_retest_gedai_eeg_from_ids``,
-extrae el espacio latente via ICA + seleccion de subespacio, y aplica
-el estimador Kramers-Moyal y la reconstruccion de potencial via
-Galerkin-B-spline (IgA).
+extrae el espacio latente con el **pipeline modular de 3 etapas**
+(Embedding → Dinámica → Selección), y aplica el estimador Kramers-Moyal y
+la reconstruccion de potencial via Galerkin-B-spline (IgA).
+
+Los argumentos legacy (``--scoring-method markov|hankel_dmd|...``) siguen
+funcionando: se mapean internamente a la nueva API de etapas.  Tambien se
+pueden pasar las etapas directamente con ``--stage1-embedding``,
+``--stage2-dynamics`` y ``--stage3-selection``.
 
 Usage::
 
-    # Tarea individual
+    # Legacy (mapeado a stage1='hankel', stage2='dmd', stage3='top_n')
     python test_iga_from_eeg_latent_test_retest_gedai.py --subject sub-01 \\
-        --session session1 --task eyesclosed --t-start 0 --t-end 60
+        --session session1 --task eyesclosed --t-start 0 --t-end 60 \\
+        --scoring-method hankel_dmd
 
-    # Forzar recalculo del espacio latente
-    python test_iga_from_eeg_latent_test_retest_gedai.py --subject sub-01 ... --ignore-cache
+    # Nueva API: NLSA (Hankel + Diffusion Maps + top-n)
+    python test_iga_from_eeg_latent_test_retest_gedai.py --subject sub-01 \\
+        --session session1 --task eyesclosed \\
+        --stage1-embedding hankel --stage1-params '{"depth": 250}' \\
+        --stage2-dynamics diffusion_maps \\
+        --stage2-params '{"svd_rank": 50, "k": 100}' \\
+        --stage3-selection top_n
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 import time
 import warnings
@@ -42,7 +55,10 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.latent_space_extraction.extract_latent_subspace import extract_latent_space
+from src.latent_space_extraction.extract_latent_subspace import (
+    extract_latent_space,
+    map_legacy_scoring_method,
+)
 
 from src.potential_reconstruction.km_tools_v2 import (
     extract_km_coefficients,
@@ -105,17 +121,39 @@ def _parse_args() -> argparse.Namespace:
     # ---- Latent-space extraction params ----
     parser.add_argument("--latent-dim", type=int, default=2,
                         help="Dimensionality of the latent subspace (default: 2)")
+    # ---- NEW 3-stage pipeline API ----
+    parser.add_argument("--stage1-embedding", type=str, default=None,
+                        choices=["none", "hankel"],
+                        help="Stage 1 embedding. If omitted, the legacy "
+                             "--scoring-method mapping is used.")
+    parser.add_argument("--stage1-params", type=str, default=None,
+                        help='JSON dict of Stage-1 params, e.g. \'{"depth": 250}\'')
+    parser.add_argument("--stage2-dynamics", type=str, default=None,
+                        choices=["pca_ica", "pca", "dmd", "diffusion_maps"],
+                        help="Stage 2 dynamics (new API).")
+    parser.add_argument("--stage2-params", type=str, default=None,
+                        help='JSON dict of Stage-2 params, e.g. \'{"svd_rank": 50}\'')
+    parser.add_argument("--stage3-selection", type=str, default=None,
+                        choices=["top_n", "markov_fastest", "markov_slowest"],
+                        help="Stage 3 selection (new API).")
+    parser.add_argument("--stage3-params", type=str, default=None,
+                        help='JSON dict of Stage-3 params, e.g. \'{"n_bins": 10}\'')
+    # ---- Legacy scoring API (mapped onto the new stages) ----
     parser.add_argument("--scoring-method", type=str, default="hankel_dmd",
                         choices=["markov", "markov_inverted", "conservative", "weighted",
                                  "sequential", "pareto", "independent",
                                  "hankel_dmd", "diffusion_maps"],
-                        help="Subspace selection strategy (default: hankel_dmd)")
+                        help="Legacy subspace selection strategy (default: hankel_dmd). "
+                             "Mapped internally onto the new 3-stage API. Ignored if "
+                             "any --stageX argument is given.")
     parser.add_argument("--fc-metric", type=str, default="variance_sum",
                         choices=["variance_sum", "first_pc_var", "total_variance"])
     parser.add_argument("--n-bins", type=int, default=10,
                         help="Quantile bins for Markov discretisation (default: 10)")
     parser.add_argument("--workers", type=int, default=None,
                         help="Number of parallel processes for subspace search")
+    parser.add_argument("--search-strategy", type=str, default="exhaustive",
+                        choices=["exhaustive", "greedy"])
     # ---- Which latent dimension(s) to feed into KM ----
     parser.add_argument("--analysis-dim", type=int, default=None,
                         help="Number of latent dimensions to use for KM. "
@@ -127,6 +165,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--h-freq", type=float, default=40.0)
     parser.add_argument("--ica-method", type=str, default="picard")
     parser.add_argument("--verbose", action="store_true", default=True)
+    # ---- Hankel (legacy convenience; also usable as stage1 param) ----
+    parser.add_argument("--hankel-embedding-depth", type=int, default=None,
+                        help="Hankel embedding depth T. None = auto "
+                             "(clip(sfreq*0.25, 50, 200)).")
     # ---- Diffusion Maps params ----
     parser.add_argument(
         "--diffusion-sigma", type=float, default=None,
@@ -160,6 +202,108 @@ def _parse_args() -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline-spec resolution: new stage API or legacy scoring-method mapping
+# ---------------------------------------------------------------------------
+
+
+def _json_params(raw: str | None) -> dict:
+    """Parse a JSON params dict from the CLI (empty dict when omitted)."""
+    if raw is None:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Stage params must be a JSON object, got: {raw!r}")
+    return parsed
+
+
+def _resolve_pipeline_spec(args: argparse.Namespace) -> dict:
+    """
+    Resolve the effective 3-stage specification.
+
+    * If any ``--stageX`` argument is given → new API (missing stages take
+      their defaults; CLI convenience flags --diffusion-* /
+      --hankel-embedding-depth / --n-bins are injected into the JSON
+      params when not already present).
+    * Otherwise → legacy ``--scoring-method`` mapping via
+      :func:`map_legacy_scoring_method`.
+
+    Returns a dict with keys ``stage1_embedding``, ``stage1_params``,
+    ``stage2_dynamics``, ``stage2_params``, ``stage3_selection``,
+    ``stage3_params``.
+    """
+    use_new_api = any([
+        args.stage1_embedding is not None,
+        args.stage2_dynamics is not None,
+        args.stage3_selection is not None,
+    ])
+
+    if use_new_api:
+        s1 = None if args.stage1_embedding in (None, "none") else args.stage1_embedding
+        s2 = args.stage2_dynamics or "pca_ica"
+        s3 = args.stage3_selection or "top_n"
+
+        p1 = _json_params(args.stage1_params)
+        p2 = _json_params(args.stage2_params)
+        p3 = _json_params(args.stage3_params)
+
+        # Inject CLI convenience flags when not overridden in the JSON
+        if s1 == "hankel":
+            p1.setdefault("depth", args.hankel_embedding_depth)
+        if s2 == "diffusion_maps":
+            p2.setdefault("sigma", args.diffusion_sigma)
+            p2.setdefault("k", args.diffusion_k)
+            p2.setdefault("diffusion_time", args.diffusion_time)
+            p2.setdefault("alpha", args.diffusion_alpha)
+        if s2 == "pca_ica":
+            p2.setdefault("ica_method", args.ica_method)
+        if s3 in ("markov_fastest", "markov_slowest"):
+            p3.setdefault("n_bins", args.n_bins)
+            p3.setdefault("search_strategy", args.search_strategy)
+
+        return {
+            "stage1_embedding": s1,
+            "stage1_params": p1,
+            "stage2_dynamics": s2,
+            "stage2_params": p2,
+            "stage3_selection": s3,
+            "stage3_params": p3,
+        }
+
+    # Legacy mapping
+    return map_legacy_scoring_method(
+        args.scoring_method,
+        n_dim=args.latent_dim,
+        fc_metric=args.fc_metric,
+        n_bins=args.n_bins,
+        hankel_embedding_depth=args.hankel_embedding_depth,
+        diffusion_sigma=args.diffusion_sigma,
+        diffusion_k=args.diffusion_k,
+        diffusion_time=args.diffusion_time,
+        diffusion_alpha=args.diffusion_alpha,
+        ica_method=args.ica_method,
+        search_strategy=args.search_strategy,
+    )
+
+
+def _spec_label(spec: dict) -> str:
+    """Short human-readable label for the stage chain (used in paths)."""
+    s1 = spec["stage1_embedding"] or "none"
+    return f"{s1}+{spec['stage2_dynamics']}+{spec['stage3_selection']}"
+
+
+def _spec_hash(spec: dict) -> str:
+    """
+    Short hash of the full stage spec (stages + params).
+
+    Included in the cache key so that different parameter combinations
+    never collide (requirement: the cache key must contain the hashes of
+    the 3-stage parameters).
+    """
+    payload = json.dumps(spec, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -180,13 +324,20 @@ def main() -> int:
 
     db_path = args.db_path or DB_TEST_RETEST_GEDAI_PATH
 
+    # Resolve the effective 3-stage spec (new API or legacy mapping)
+    spec = _resolve_pipeline_spec(args)
+    spec_label = _spec_label(spec)
+    spec_hash = _spec_hash(spec)
+    print(f"\n  Pipeline spec : {spec_label}  (hash {spec_hash})")
+    print(f"  Stage params  : {json.dumps(spec, default=str)}")
+
     # -----------------------------------------------------------------
     # Output directory: test_retest_gedai/<subject>/<session>/<task>/from{t_start}_to_{t_end}
     # -----------------------------------------------------------------
     out_dir = Path(
         args.out_dir
         + f"/test_retest_gedai/{args.subject}/{args.session}"
-        + f"/{args.latent_dim}_latent_dim_{args.scoring_method}"
+        + f"/{args.latent_dim}_latent_dim_{spec_label}_{spec_hash}"
         + f"/from{args.t_start}s_to_{args.t_end}s_{args.task}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -233,7 +384,7 @@ def main() -> int:
         args.cache_file = Path(
             BASE_CACHE_PATH
             + f"/cache_eeg_test_retest_gedai/{args.subject}/{args.session}"
-            + f"/task_{args.task}_latent_dim_{args.latent_dim}_{args.scoring_method}"
+            + f"/task_{args.task}_latent_dim_{args.latent_dim}_{spec_label}_{spec_hash}"
             + f"/from{args.t_start}s_to_{args.t_end}s.npz"
         )
     cache_path = Path(args.cache_file)
@@ -259,25 +410,17 @@ def main() -> int:
         latent, meta = extract_latent_space(
             raw,
             n_dim=args.latent_dim,
-            scoring_method=args.scoring_method,
-            fc_metric=args.fc_metric,
-            n_bins=args.n_bins,
+            stage1_embedding=spec["stage1_embedding"],
+            stage1_params=spec["stage1_params"],
+            stage2_dynamics=spec["stage2_dynamics"],
+            stage2_params=spec["stage2_params"],
+            stage3_selection=spec["stage3_selection"],
+            stage3_params=spec["stage3_params"],
             l_freq=args.l_freq,
             h_freq=args.h_freq,
-            ica_method=args.ica_method,
             n_workers=args.workers,
             verbose=verbose,
-            diffusion_sigma=args.diffusion_sigma,
-            diffusion_k=args.diffusion_k,
-            diffusion_time=args.diffusion_time,
-            diffusion_alpha=args.diffusion_alpha,
         )
-
-        # For diffusion_maps, remove ICA/FC params from metadata to avoid confusion
-        if args.scoring_method == "diffusion_maps":
-            for key in ["fc_metric", "n_bins", "alpha", "search_strategy",
-                        "n_ica_components", "ica_method"]:
-                meta.pop(key, None)
 
         print(f"\n  [CACHE] Saving latent space to: {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -292,12 +435,12 @@ def main() -> int:
     print(f"  Selected ICs       : {meta['selected_indices']}")
     print(f"  Scores             : {meta['latent_scores']}")
     print(f"  Extraction time    : {meta['elapsed_time']:.1f} s")
-    
+
     # Plot latent trajectory
     plot_latent_trajectory(
             latent,
             out_dir=out_dir,
-            method_name=args.scoring_method,
+            method_name=spec_label,
         )
 
     # =====================================================================
@@ -319,26 +462,24 @@ def main() -> int:
     else:
         data = latent[:, :analysis_dim]
         print(f"\n  Using first {analysis_dim} latent columns for KM analysis")
-        
+
     ck_result = chapman_kolmogorov_test(
-    data,
-    dt=dt,
-    n_bins=20,
-    threshold=0.15,
-    plot=True,
-    out_dir=out_dir,
-    verbose=True,
-)
+        data,
+        dt=dt,
+        n_bins=20,
+        threshold=0.15,
+        plot=True,
+        out_dir=out_dir,
+        verbose=True,
+    )
 
     if not ck_result["is_markovian"]:
         print("\n  [WARN] Latent space is NOT Markovian. KM results may be invalid.")
         print("  Consider: increasing latent_dim, increasing embedding_depth,")
-        print("  or switching to a different scoring method.")
+        print("  or switching to a different stage combination.")
     else:
         print(f"\n  [OK] Markovian at tau* = {ck_result['tau_star']:.4f} s "
-            f"({ck_result['tau_star_idx']} steps)")
-        # Opcional: usar tau* como lag para KM
-        # km_lag = ck_result["tau_star"]
+              f"({ck_result['tau_star_idx']} steps)")
 
     D = analysis_dim
     print(f"  Data shape for KM  : {data.shape}")
@@ -376,7 +517,7 @@ def main() -> int:
     # =====================================================================
     config = CONFIGS['base_2D_model'].copy()
     config.update({
-        "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{args.scoring_method}",
+        "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{spec_label}",
         "D": D,
         "bins": [40] * D,
         "drift_components": list(range(D)),
@@ -470,11 +611,11 @@ def main() -> int:
         figsize=(12, 8),
     )
     for key, fname in [("drift", "km_components_drift.png"),
-                   ("diffusion", "km_components_diffusion.png")]:
+                       ("diffusion", "km_components_diffusion.png")]:
         fig_km = figs_km.get(key)
         if fig_km is None:
             continue
-        
+
         fig_km.suptitle("...", fontsize=14)
         fig_km.tight_layout(rect=[0, 0, 1, 0.95])
         fig_km.savefig(out_dir / fname, dpi=150)
@@ -563,6 +704,8 @@ def main() -> int:
             "t_end": args.t_end,
             "latent_dim": latent_dim,
             "analysis_dim": D,
+            "pipeline": spec_label,
+            "pipeline_spec": {k: v for k, v in spec.items() if k.endswith("params") or k.startswith("stage")},
             "scoring_method": args.scoring_method,
         }
 
@@ -594,16 +737,15 @@ def main() -> int:
             align_to_zero=True,
             crop_to_valid=True,
             show_streamlines=False,
-            stream_function=result_iga.get('stream_function'),        # NUEVO
-            reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
+            stream_function=result_iga.get('stream_function'),
+            reconstructed_field=result_iga.get('reconstructed_field'),
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
         fig_pot_2d.savefig(out_dir / "potential_2d.png", dpi=150)
         plt.close(fig_pot_2d)
         print("  Saved potential_2d.png")
-        
-        ### Lo mismo pero con streamlines y fuerza no-conservativa (si están disponibles)
+
         fig_pot_2d = plot_potential_2d(
             U_rec, edges,
             title_est=f"{config['model_name'].upper()} -- Reconstructed",
@@ -612,8 +754,8 @@ def main() -> int:
             align_minima=True,
             align_to_zero=True,
             crop_to_valid=True,
-            stream_function=result_iga.get('stream_function'),        # NUEVO
-            reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
+            stream_function=result_iga.get('stream_function'),
+            reconstructed_field=result_iga.get('reconstructed_field'),
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -637,15 +779,11 @@ def main() -> int:
             fig_res.savefig(out_dir / "potential_2d_residual.png", dpi=150)
             plt.close(fig_res)
             print("  Saved potential_2d_residual.png")
-        
-        # ================================================================
-        # 8b. NUEVOS PLOTS: fuerza no-conservativa v y combinación U + v + ψ
-        # (solo cuando la stream function está disponible, D == 2)
-        # ================================================================
+
         if result_iga.get('nonconservative_force') is not None:
             fig_v = plot_nonconservative_force_2d(
                 result_iga['nonconservative_force'], edges,
-                title=f'Fuerza no-conservativa v = f + D·∇U — {config['model_name'].upper()}',
+                title=f"Fuerza no-conservativa v = f + D·∇U — {config['model_name'].upper()}",
                 crop_to_valid=True,
             )
             fig_v.savefig(out_dir / "potential_2d_nonconservative_force.png", dpi=150)
@@ -659,12 +797,12 @@ def main() -> int:
                 stream_function=result_iga.get('stream_function'),
                 nonconservative_force=result_iga.get('nonconservative_force'),
                 reconstructed_field=result_iga.get('reconstructed_field'),
-                title=f'{config['model_name'].upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)',
+                title=f"{config['model_name'].upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)",
                 crop_to_valid=True,
             )
             fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
             plt.close(fig_comb)
-            print("  Saved potential_2d_combined.png")   
+            print("  Saved potential_2d_combined.png")
 
     elif D >= 3:
         dim_pairs = [(i, j) for i in range(min(D, 3)) for j in range(i + 1, min(D, 3))]
@@ -698,6 +836,7 @@ def main() -> int:
     print(f"  Subject             : {args.subject}")
     print(f"  Session             : {args.session}")
     print(f"  Task                : {args.task}")
+    print(f"  Pipeline            : {spec_label} (hash {spec_hash})")
     print(f"  Time window         : {args.t_start:.1f}s -> {args.t_end:.1f}s")
     print(f"  Total wall-clock    : {total_time:.1f} s")
     print(f"  Output saved to     : {out_dir.absolute()}")

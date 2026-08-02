@@ -1,118 +1,80 @@
 """
-Latent Subspace Extraction — End-to-End Orchestrator
+Latent Subspace Extraction — Modular 3-Stage Pipeline
 =====================================================
 
-Single-call function that runs the complete pipeline:
-    raw EEG → filtering → ICA → ICLabel artifact rejection
-    → subspace selection (Markov / Conservative / Weighted / Sequential / Pareto)
-    → latent space as np.ndarray (n_samples, n_dim)
+Refactored orchestrator: the monolithic pipeline is now a composition of
+three decoupled stages with a uniform interface::
 
-**New:** Hankel+DMD mode (``scoring_method="hankel_dmd"``) bypasses ICA
-entirely and extracts the latent space via delay embedding + Dynamic
-Mode Decomposition.
+    Stage 1 — Embedding   : None | "hankel"
+    Stage 2 — Dynamics    : "pca_ica" | "pca" | "dmd" | "diffusion_maps"
+    Stage 3 — Selection   : "top_n" | "markov_fastest" | "markov_slowest"
 
-**New:** Diffusion Maps mode (``scoring_method="diffusion_maps"``) bypasses ICA
-entirely and extracts the latent space via Diffusion Maps (Coifman & Lafon,
-2006) using pyDiffMap, preserving intrinsic geometric connectivity.
+Arbitrary combinations are allowed and comparable under a single API,
+e.g. "Hankel + PCA + Markov", "Hankel + DM + top-n" (NLSA), "no Hankel +
+ICA + Markov", ...
 
-Typical usage::
+Typical usage (new API)::
 
     from extract_latent_subspace import extract_latent_space
 
-    # From file
+    # Legacy-style: no Hankel, ICA + Markov fastest
     latent, meta = extract_latent_space(
-        "/path/to/recording_raw.fif",
-        n_dim=2,
-        scoring_method="markov",
-        n_bins=5,
-        n_workers=4,
-    )
-    # latent.shape == (n_samples, 2)
-
-    # From existing mne.Raw object
-    latent, meta = extract_latent_space(
-        raw,
-        n_dim=3,
-        scoring_method="weighted",
-        alpha=0.5,
-        fc_metric="total_variance",
-        n_bins=5,
+        raw, n_dim=2,
+        stage1_embedding=None,
+        stage2_dynamics="pca_ica",
+        stage2_params={"n_components": None, "ica_method": "picard"},
+        stage3_selection="markov_fastest",
+        stage3_params={"n_bins": 5, "search_strategy": "exhaustive"},
     )
 
-    # Diffusion Maps (no ICA/ICLabel)
+    # NLSA: Hankel + Diffusion Maps + top-n
     latent, meta = extract_latent_space(
-        raw,
-        n_dim=3,
-        scoring_method="diffusion_maps",
-        diffusion_sigma=0.5,
-        diffusion_k=80,
-        diffusion_time=2.0,
-        diffusion_alpha=0.5,
-        l_freq=1.0,
-        h_freq=40.0,
+        raw, n_dim=2,
+        stage1_embedding="hankel",
+        stage1_params={"depth": 250},
+        stage2_dynamics="diffusion_maps",
+        stage2_params={"svd_rank": 50, "sigma": None, "k": 100, "alpha": 0.5},
+        stage3_selection="top_n",
     )
+
+Backward compatibility
+----------------------
+The legacy ``scoring_method=...`` keyword (and its associated parameters)
+is still accepted and mapped onto the new stages — see
+:func:`map_legacy_scoring_method`.  Legacy meta keys
+(``selected_indices``, ``latent_scores``, ``preprocessing``, ``Y``,
+``Y_shape``, ``elapsed_time``) are preserved at the top level.
 
 Return value
 ------------
 latent : np.ndarray, shape (n_samples, n_dim)
-    The extracted latent subspace, one column per latent dimension.
-    Time runs along the rows (same axis as the original time series).
-    **Note:** for ``hankel_dmd``, ``n_samples = original_n_times - T + 1``
-    due to the delay embedding.
-
+    The extracted latent subspace (time along rows).  With the Hankel
+    embedding, ``n_samples = n_times - depth + 1``.
 meta : dict
-    Metadata including the selected component indices, scores, timing,
-    preprocessing info, etc.
+    ``meta["pipeline"]`` records the exact stage chain; each stage injects
+    its own sub-dict (``meta["stage1"]``, ``meta["stage2"]``,
+    ``meta["stage3"]``); legacy keys are kept for compatibility.
 """
 
 from __future__ import annotations
 
 import time
+import warnings
 from pathlib import Path
 from typing import Literal
 
 import mne
 import numpy as np
 
-#Preprocessing
 from src.latent_space_extraction.eeg_preprocessing import (
     extract_filtered_data_matrix,
     load_raw_eeg,
-    load_sample_mne_data,
-    run_full_preprocessing,
 )
-
-# Conservative fraction (Stage II)
-from src.latent_space_extraction.conservative_fraction import (
-    find_best_subspace_fc,
-    greedy_forward_selection_fc,
-    score_many_combinations_fc,
-)
-
-# Markov time (Stage III)
-from src.latent_space_extraction.markov_subspace import (
-    find_best_subspace_markov,
-    greedy_forward_selection_markov,
-    score_many_combinations_markov,
-)
-
-# Unified scoring strategies
-from src.latent_space_extraction.scoring import (
-    independent_selection,
-    pareto_frontier_selection,
-    sequential_filtering_selection,
-    weighted_score_selection,
-)
-
-# Hankel+DMD latent extractor
-from src.latent_space_extraction.hankel_dmd_extractor import (
-    extract_hankel_dmd_latent_space,
-)
-
-# Diffusion Maps latent extractor
-from src.latent_space_extraction.diffusion_maps_extractor import (
-    extract_diffusion_maps_latent_space,
-    nystroem_extension,
+from src.latent_space_extraction.pipeline import (
+    PipelineContext,
+    build_stage1,
+    build_stage2,
+    build_stage3,
 )
 
 
@@ -127,6 +89,141 @@ DEFAULT_ICA_RANDOM_STATE: int = 42
 DEFAULT_N_BINS: int = 5
 DEFAULT_FC_METRIC: str = "variance_sum"
 
+_LEGACY_SCORING_METHODS = (
+    "markov", "markov_inverted", "conservative", "weighted", "sequential",
+    "pareto", "independent", "hankel_dmd", "diffusion_maps",
+)
+
+
+# ---------------------------------------------------------------------------
+# Legacy → new-API mapping
+# ---------------------------------------------------------------------------
+
+def map_legacy_scoring_method(
+    scoring_method: str,
+    *,
+    n_dim: int = 2,
+    fc_metric: str = DEFAULT_FC_METRIC,
+    n_bins: int = DEFAULT_N_BINS,
+    alpha: float | None = None,
+    primary_criterion: str = "markov",
+    sequential_K: int | None = None,
+    hankel_embedding_depth: int | None = None,
+    diffusion_sigma: float | None = None,
+    diffusion_k: int = 100,
+    diffusion_time: float = 0.0,
+    diffusion_alpha: float = 0.5,
+    n_components: int | float | None = None,
+    ica_method: str = DEFAULT_ICA_METHOD,
+    ica_random_state: int | None = DEFAULT_ICA_RANDOM_STATE,
+    retained_labels: list[str] | None = None,
+    search_strategy: str = "exhaustive",
+) -> dict:
+    """
+    Map a legacy ``scoring_method`` call onto the new 3-stage spec.
+
+    Returns
+    -------
+    spec : dict
+        ``{"stage1_embedding", "stage1_params", "stage2_dynamics",
+        "stage2_params", "stage3_selection", "stage3_params"}`` ready to
+        be unpacked into :func:`extract_latent_space`.
+
+    Mapping table
+    -------------
+    ==================  ============================================
+    legacy method       new stage chain
+    ==================  ============================================
+    ``markov``          None + pca_ica + markov_fastest
+    ``markov_inverted`` None + pca_ica + markov_slowest
+    ``hankel_dmd``      hankel + dmd (rank=n_dim) + top_n
+    ``diffusion_maps``  None + diffusion_maps (n_components=n_dim) + top_n
+    ``conservative``    None + pca_ica + legacy_fc:conservative
+    ``weighted``        None + pca_ica + legacy_fc:weighted
+    ``sequential``      None + pca_ica + legacy_fc:sequential
+    ``pareto``          None + pca_ica + legacy_fc:pareto
+    ``independent``     None + pca_ica + legacy_fc:independent
+    ==================  ============================================
+    """
+    if scoring_method not in _LEGACY_SCORING_METHODS:
+        raise ValueError(
+            f"Unknown legacy scoring_method {scoring_method!r}. "
+            f"Valid options: {list(_LEGACY_SCORING_METHODS)}"
+        )
+
+    ica_params = {
+        "n_components": n_components,
+        "ica_method": ica_method,
+        "ica_random_state": ica_random_state,
+        "retained_labels": retained_labels,
+    }
+
+    if scoring_method == "markov":
+        return {
+            "stage1_embedding": None,
+            "stage1_params": {},
+            "stage2_dynamics": "pca_ica",
+            "stage2_params": ica_params,
+            "stage3_selection": "markov_fastest",
+            "stage3_params": {"n_bins": n_bins, "search_strategy": search_strategy},
+        }
+
+    if scoring_method == "markov_inverted":
+        return {
+            "stage1_embedding": None,
+            "stage1_params": {},
+            "stage2_dynamics": "pca_ica",
+            "stage2_params": ica_params,
+            "stage3_selection": "markov_slowest",
+            "stage3_params": {"n_bins": n_bins, "search_strategy": search_strategy},
+        }
+
+    if scoring_method == "hankel_dmd":
+        return {
+            "stage1_embedding": "hankel",
+            "stage1_params": {"depth": hankel_embedding_depth},
+            "stage2_dynamics": "dmd",
+            # rank = n_dim reproduces the legacy numerics exactly
+            "stage2_params": {"rank": n_dim},
+            "stage3_selection": "top_n",
+            "stage3_params": {},
+        }
+
+    if scoring_method == "diffusion_maps":
+        return {
+            "stage1_embedding": None,
+            "stage1_params": {},
+            "stage2_dynamics": "diffusion_maps",
+            # n_components = n_dim reproduces the legacy branch
+            "stage2_params": {
+                "n_components": n_dim,
+                "sigma": diffusion_sigma,
+                "k": diffusion_k,
+                "diffusion_time": diffusion_time,
+                "alpha": diffusion_alpha,
+            },
+            "stage3_selection": "top_n",
+            "stage3_params": {},
+        }
+
+    # Conservative-fraction based legacy strategies
+    return {
+        "stage1_embedding": None,
+        "stage1_params": {},
+        "stage2_dynamics": "pca_ica",
+        "stage2_params": ica_params,
+        "stage3_selection": "legacy_fc",
+        "stage3_params": {
+            "method": scoring_method,
+            "fc_metric": fc_metric,
+            "alpha": alpha,
+            "primary_criterion": primary_criterion,
+            "sequential_K": sequential_K,
+            "n_bins": n_bins,
+            "search_strategy": search_strategy,
+        },
+    }
+
 
 # ---------------------------------------------------------------------------
 # Main orchestrator
@@ -137,168 +234,142 @@ def extract_latent_space(
     *,
     # ---- Subspace dimension ----
     n_dim: int = 2,
-    # ---- Scoring method ----
-    scoring_method: Literal[
-        "markov","markov_inverted", "conservative", "weighted", "sequential", "pareto",
-        "independent", "hankel_dmd", "diffusion_maps",
-    ] = "markov",
-    # ---- Conservative-fraction params ----
+    # ---- Stage 1: Embedding ----
+    stage1_embedding: Literal[None, "hankel"] = None,
+    stage1_params: dict | None = None,
+    # ---- Stage 2: Dynamics ----
+    stage2_dynamics: Literal["pca_ica", "pca", "dmd", "diffusion_maps"] = "pca_ica",
+    stage2_params: dict | None = None,
+    # ---- Stage 3: Selection ----
+    stage3_selection: Literal["top_n", "markov_fastest", "markov_slowest"] = "top_n",
+    stage3_params: dict | None = None,
+    # ---- Preprocessing params ----
+    l_freq: float = DEFAULT_L_FREQ,
+    h_freq: float = DEFAULT_H_FREQ,
+    # ---- Search / compute params ----
+    n_workers: int | None = None,
+    verbose: bool | str | None = None,
+    # ---- Legacy API (deprecated; mapped onto the stages above) ----
+    scoring_method: str | None = None,
     fc_metric: str = DEFAULT_FC_METRIC,
-    # ---- Markov-time params ----
     n_bins: int = DEFAULT_N_BINS,
-    # ---- Weighted strategy params ----
     alpha: float | None = None,
-    # ---- Sequential strategy params ----
     primary_criterion: Literal["fc", "markov"] = "markov",
     sequential_K: int | None = None,
-    # ---- Hankel+DMD params ----
     hankel_embedding_depth: int | None = None,
-    # ---- Diffusion Maps params ----
     diffusion_sigma: float | None = None,
     diffusion_k: int = 100,
     diffusion_time: float = 0.0,
     diffusion_alpha: float = 0.5,
-    # ---- Preprocessing params ----
-    l_freq: float = DEFAULT_L_FREQ,
-    h_freq: float = DEFAULT_H_FREQ,
     n_components: int | float | None = None,
     ica_method: str = DEFAULT_ICA_METHOD,
     ica_random_state: int | None = DEFAULT_ICA_RANDOM_STATE,
     retained_labels: list[str] | None = None,
-    # ---- Search / compute params ----
     search_strategy: Literal["exhaustive", "greedy"] = "exhaustive",
-    n_workers: int | None = None,
-    verbose: bool | str | None = None,
 ) -> tuple[np.ndarray, dict]:
     """
-    Extract a low-dimensional latent subspace from an EEG recording.
+    Extract a low-dimensional latent subspace from an EEG recording with
+    the modular 3-stage pipeline.
 
     Parameters
     ----------
     raw_input : mne.io.Raw | str | Path
-        Either an MNE Raw object already loaded in memory, or a path to a
-        raw data file (``.fif``, ``.edf``, ``.bdf``, ``.set``, etc.).
+        MNE Raw object in memory, or path to a raw data file.
     n_dim : int, default 2
-        Target dimensionality of the latent subspace (``N`` in the paper).
-    scoring_method : str, default ``"markov"``
-        Subspace selection strategy. One of:
-
-        * ``"markov"``       — minimise Markov relaxation time (fastest
-          dynamics). Recommended based on empirical results.
-        * ``"markov_inverted"`` — maximise Markov relaxation time (slowest
-          dynamics).
-        * ``"conservative"`` — maximise conservative fraction (variance
-          retention). Falls back to greedy when ``n_dim >= 4``.
-        * ``"weighted"``     — convex combination of normalised fc and
-          1/tau. Requires *alpha*.
-        * ``"sequential"``   — filter top-K with one criterion, re-rank
-          with the other.
-        * ``"pareto"``       — return the full Pareto frontier (useful
-          for downstream multi-objective analysis).
-        * ``"independent"``  — run both criteria independently and return
-          the Markov winner (discards the FC winner).
-        * ``"hankel_dmd"``   — **Hankel delay embedding + DMD**.  Bypasses
-          ICA/ICLabel entirely.  Applies only band-pass filtering, then
-          builds a block-Hankel matrix from delay embeddings and extracts
-          the latent space via truncated SVD + DMD.  The ``n_dim``
-          parameter controls the number of retained DMD modes (latent
-          rank).  Additional params: *hankel_embedding_depth*.
-
-        * ``"diffusion_maps"`` — **Diffusion Maps** (Coifman & Lafon
-          2006).  Bypasses ICA/ICLabel entirely.  Applies only band-pass
-          filtering, then constructs a Gaussian-kernel affinity graph on
-          time samples (each instant treated as a point in channel space)
-          and extracts the latent space via eigendecomposition of the
-          diffusion operator.  Preserves intrinsic geometric connectivity
-          and linearises the Koopman operator.  Additional params:
-          *diffusion_sigma*, *diffusion_k*, *diffusion_time*,
-          *diffusion_alpha*.
-
-    fc_metric : str, default ``"variance_sum"``
-        Variance measure for the conservative fraction. One of:
-        ``"variance_sum"``, ``"first_pc_var"``, ``"total_variance"``.
-    n_bins : int, default 5
-        Number of quantile bins per component for Markov discretisation.
-    alpha : float or None, optional
-        Trade-off parameter for the weighted strategy in ``[0, 1]``.
-        ``0`` = pure Markov, ``1`` = pure conservative fraction.
-        Required when *scoring_method* is ``"weighted"``.
-    primary_criterion : ``"fc"`` | ``"markov"``, default ``"markov"``
-        Which criterion leads the sequential filtering strategy.
-    sequential_K : int or None, optional
-        Number of candidates to retain in the first filtering stage of
-        sequential strategy. ``None`` auto-computes ``min(20, 5% of combos)``.
-    hankel_embedding_depth : int or None, optional
-        **Only used when** ``scoring_method="hankel_dmd"``.  Embedding
-        depth (*T*) for the Hankel matrix — number of past snapshots in
-        the delay vector.  ``None`` auto-computes from the sampling rate
-        (rule of thumb: ``T = clip(sfreq * 0.25, 50, 200)``).
-    diffusion_sigma : float or None, optional
-        **Only used when** ``scoring_method="diffusion_maps"``.  Bandwidth
-        sigma of the Gaussian kernel.  ``None`` triggers automatic
-        estimation via the Berry-Giannakis-Harlim method (``bgh``).
-    diffusion_k : int, default 100
-        **Only used when** ``scoring_method="diffusion_maps"``.  Number of
-        nearest neighbours for the sparse affinity matrix.
-    diffusion_time : float, default 0.0
-        **Only used when** ``scoring_method="diffusion_maps"``.  Diffusion
-        time *t* >= 0.  Larger values filter fine-scale noise and
-        highlight macroscopic brain-state dynamics.  ``0.0`` = no
-        eigenvalue filtering (raw eigenvectors).
-    diffusion_alpha : float, default 0.5
-        **Only used when** ``scoring_method="diffusion_maps"``.  Density-
-        normalisation parameter (Coifman-Lafon): ``0.0`` = Laplacian
-        Eigenmaps, ``0.5`` = classical Diffusion Maps, ``1.0`` =
-        Fokker-Planck.
-    l_freq : float, default 1.0
-        High-pass filter cutoff (Hz).
-    h_freq : float, default 40.0
-        Low-pass filter cutoff (Hz).
-    n_components : int | float | None, optional
-        Number of ICA components. ``None`` = ``n_channels - 1``.
-        **Ignored when** ``scoring_method="hankel_dmd"``.
-    ica_method : str, default ``"picard"``
-        ICA algorithm (``"picard"``, ``"fastica"``, ``"infomax"``).
-        **Ignored when** ``scoring_method="hankel_dmd"``.
-    ica_random_state : int | None, default 42
-        Random seed for ICA reproducibility.
-        **Ignored when** ``scoring_method="hankel_dmd"``.
-    retained_labels : list of str, optional
-        ICLabel classes to keep. Defaults to ``["brain", "other"]``.
-        **Ignored when** ``scoring_method="hankel_dmd"``.
-    search_strategy : ``"exhaustive"`` | ``"greedy"``, default ``"exhaustive"``
-        Combinatorial search strategy. Use ``"greedy"`` when
-        ``n_dim >= 4`` or for faster approximate results.
-        **Ignored when** ``scoring_method="hankel_dmd"``.
-    n_workers : int or None, optional
-        Number of parallel processes. ``None`` uses all CPU cores.
-    verbose : bool | str | None, optional
+        Target dimensionality of the latent subspace.
+    stage1_embedding : None | "hankel", default None
+        Optional delay embedding.  ``"hankel"`` builds the multivariate
+        block-Hankel matrix ``H ∈ R^{(N_c·T)×(N_t−T+1)}``;
+        ``stage1_params={"depth": None}`` auto-computes
+        ``T = clip(sfreq * 0.25, 50, 200)``.
+    stage2_dynamics : str, default "pca_ica"
+        Dynamics decomposition: ``"pca"`` (truncated SVD), ``"pca_ica"``
+        (MNE ICA on real channels / sklearn FastICA on Hankel PCs),
+        ``"dmd"`` (Hankel-DMD / direct AR-1), ``"diffusion_maps"`` (DM on
+        time instants / NLSA on Hankel PCs).
+    stage2_params : dict | None
+        Per-dynamics parameters (e.g. ``n_components``, ``svd_rank``,
+        ``sigma``, ``k``, ``diffusion_time``, ``alpha``, ``rank``,
+        ``ica_method``, ...).
+    stage3_selection : str, default "top_n"
+        Final mode selection: ``"top_n"`` (simple ranking),
+        ``"markov_fastest"`` / ``"markov_slowest"`` (Markovian subspace
+        criterion via ``find_best_subspace_markov`` with
+        ``maximize=False`` / ``True``).
+    stage3_params : dict | None
+        e.g. ``{"n_bins": 5, "search_strategy": "exhaustive"}``.
+    l_freq, h_freq : float
+        Band-pass filter cut-offs (Hz).
+    n_workers : int | None
+        Parallel processes for the combinatorial Markov search.
+    verbose : bool | str | None
         MNE verbosity level.
+    scoring_method : str | None, optional
+        **Deprecated legacy API.**  When given, it overrides the three
+        stage arguments via :func:`map_legacy_scoring_method`.
+    fc_metric, n_bins, alpha, primary_criterion, sequential_K,
+    hankel_embedding_depth, diffusion_sigma, diffusion_k, diffusion_time,
+    diffusion_alpha, n_components, ica_method, ica_random_state,
+    retained_labels, search_strategy
+        Legacy parameters, only used together with ``scoring_method``.
 
     Returns
     -------
     latent : np.ndarray, shape (n_samples, n_dim)
-        The extracted latent subspace. Each column is one latent
-        dimension (component time series). Ready for downstream analyses.
-
-        **Special case — Hankel+DMD:** ``n_samples = n_times - T + 1``
-        (shorter than the original recording due to the delay embedding
-        window).
     meta : dict
-        Dictionary with keys:
-
-        * ``"selected_indices"``    — component indices in the clean Y
-          matrix that form the latent subspace.
-        * ``"scoring_method"``      — which strategy was used.
-        * ``"latent_scores"``       — criterion values (fc, tau, etc.).
-          For ``hankel_dmd``, contains DMD frequencies and damping rates.
-        * ``"preprocessing"``       — Stage-I info (D, T, sfreq,
-          excluded indices, label counts).
-        * ``"elapsed_time"``        — total wall-clock time in seconds.
-        * ``"Y_shape"``             — shape of the clean component
-          matrix before subspace selection.
     """
     t0 = time.time()
+
+    # =====================================================================
+    # Legacy API → new stage spec
+    # =====================================================================
+    legacy_method_used: str | None = None
+    if scoring_method is not None:
+        legacy_method_used = scoring_method
+        warnings.warn(
+            f"[extract_latent_space] scoring_method={scoring_method!r} is "
+            f"deprecated; use stage1_embedding / stage2_dynamics / "
+            f"stage3_selection instead. Mapping legacy arguments onto the "
+            f"new 3-stage API.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        spec = map_legacy_scoring_method(
+            scoring_method,
+            n_dim=n_dim,
+            fc_metric=fc_metric,
+            n_bins=n_bins,
+            alpha=alpha,
+            primary_criterion=primary_criterion,
+            sequential_K=sequential_K,
+            hankel_embedding_depth=hankel_embedding_depth,
+            diffusion_sigma=diffusion_sigma,
+            diffusion_k=diffusion_k,
+            diffusion_time=diffusion_time,
+            diffusion_alpha=diffusion_alpha,
+            n_components=n_components,
+            ica_method=ica_method,
+            ica_random_state=ica_random_state,
+            retained_labels=retained_labels,
+            search_strategy=search_strategy,
+        )
+        stage1_embedding = spec["stage1_embedding"]
+        stage1_params = spec["stage1_params"]
+        stage2_dynamics = spec["stage2_dynamics"]
+        stage2_params = spec["stage2_params"]
+        stage3_selection = spec["stage3_selection"]
+        stage3_params = spec["stage3_params"]
+
+    stage1_params = dict(stage1_params or {})
+    stage2_params = dict(stage2_params or {})
+    stage3_params = dict(stage3_params or {})
+
+    pipeline_str = (
+        f"{stage1_embedding or 'none'}+{stage2_dynamics}+{stage3_selection}"
+    )
+    print("\n" + "=" * 70)
+    print(f"  LATENT-SPACE PIPELINE: {pipeline_str}")
+    print("=" * 70)
 
     # =====================================================================
     # Load raw if a path was given
@@ -308,267 +379,185 @@ def extract_latent_space(
     else:
         raw = raw_input
 
-    # =====================================================================
-    # Hankel+DMD branch — bypasses ICA/ICLabel entirely
-    # =====================================================================
-    if scoring_method == "hankel_dmd":
-        return _extract_hankel_dmd_branch(
-            raw=raw,
-            n_dim=n_dim,
-            hankel_embedding_depth=hankel_embedding_depth,
-            l_freq=l_freq,
-            h_freq=h_freq,
-            verbose=verbose,
-            t0=t0,
-        )
+    sfreq = float(raw.info["sfreq"])
+    dt = 1.0 / sfreq
 
     # =====================================================================
-    # Diffusion Maps branch — bypasses ICA/ICLabel entirely
+    # Shared context
     # =====================================================================
-    if scoring_method == "diffusion_maps":
-        return _extract_diffusion_maps_branch(
-            raw=raw,
-            n_dim=n_dim,
-            sigma=diffusion_sigma,
-            k=diffusion_k,
-            diffusion_time=diffusion_time,
-            alpha=diffusion_alpha,
-            l_freq=l_freq,
-            h_freq=h_freq,
-            verbose=verbose,
-            t0=t0,
-        )
-
-    # =====================================================================
-    # Standard branch — Stage I: Preprocessing (filter → ICA → ICLabel)
-    # =====================================================================
-    if retained_labels is None:
-        retained_labels = ["brain", "other"]
-
-    prep = run_full_preprocessing(
-        raw,
+    ctx = PipelineContext(
+        raw=raw,
+        sfreq=sfreq,
+        dt=dt,
         l_freq=l_freq,
         h_freq=h_freq,
-        n_components=n_components,
-        ica_method=ica_method,
-        ica_random_state=ica_random_state,
-        retained_labels=retained_labels,
+        n_workers=n_workers,
         verbose=verbose,
+        stage1_name=stage1_embedding,
     )
 
-    Y = prep["Y"]  # shape (D, T), zero-mean rows
-    D, T = Y.shape
-
     # =====================================================================
-    # Stage II — Subspace Selection
+    # Stage 0 — filtered channel matrix
+    # ---------------------------------------------------------------------
+    # The MNE-ICA branch (stage2="pca_ica" without Hankel) filters the Raw
+    # object internally (legacy behaviour of run_full_preprocessing), so it
+    # must NOT be pre-filtered here.  Every other combination operates on
+    # the band-pass filtered channel matrix X.
     # =====================================================================
-    use_greedy = search_strategy == "greedy" or n_dim >= 4
+    stage2_uses_raw_directly = (stage2_dynamics == "pca_ica" and stage1_embedding is None)
 
-    if scoring_method == "markov":
-        selected_idx, meta_scores = _select_markov(
-            Y, n_dim, n_bins, use_greedy, n_workers
-        )
-        
-    elif scoring_method == "markov_inverted":
-        selected_idx, meta_scores = _select_markov(
-            Y, n_dim, n_bins, use_greedy, n_workers, maximize=True
-        )
-    
-    elif scoring_method == "conservative":
-        selected_idx, meta_scores = _select_conservative(
-            Y, n_dim, fc_metric, use_greedy, n_workers
-        )
-
-    elif scoring_method == "weighted":
-        if alpha is None:
-            raise ValueError(
-                "alpha must be provided when scoring_method='weighted'"
-            )
-        selected_idx, meta_scores = _select_weighted(
-            Y, n_dim, alpha, fc_metric, n_bins, use_greedy, n_workers
-        )
-
-    elif scoring_method == "sequential":
-        selected_idx, meta_scores = _select_sequential(
-            Y, n_dim, primary_criterion, sequential_K,
-            fc_metric, n_bins, n_workers,
-        )
-
-    elif scoring_method == "pareto":
-        selected_idx, meta_scores = _select_pareto(
-            Y, n_dim, fc_metric, n_bins, n_workers
-        )
-
-    elif scoring_method == "independent":
-        selected_idx, meta_scores = _select_independent(
-            Y, n_dim, fc_metric, n_bins, use_greedy, n_workers
-        )
-
+    if stage2_uses_raw_directly:
+        X = None
+        print("\n[Stage 0] MNE-ICA branch: filtering deferred to Stage 2 "
+              "(run_full_preprocessing).")
     else:
-        raise ValueError(f"Unknown scoring_method: {scoring_method!r}")
+        t_pre = time.time()
+        X, _raw_filtered, sfreq = extract_filtered_data_matrix(
+            raw, l_freq=l_freq, h_freq=h_freq, verbose=verbose,
+        )
+        print(f"\n[Stage 0] Filtered data matrix: shape={X.shape} "
+              f"| sfreq={sfreq:.1f} Hz | {time.time() - t_pre:.2f}s")
 
     # =====================================================================
-    # Build latent space: transpose to (n_samples, n_dim)
+    # Stage 1 — Embedding
     # =====================================================================
-    latent = Y[list(selected_idx), :].T  # (T, N) -> (n_samples, n_dim)
+    t1 = time.time()
+    stage1 = build_stage1(stage1_embedding, stage1_params)
+    if stage2_uses_raw_directly:
+        # No Hankel possible here (stage1 is None by the guard above);
+        # Stage 2 will receive the Raw object through the context.
+        embedded, meta1 = None, {
+            "embedding": None,
+            "note": "deferred to Stage 2 (MNE ICA branch)",
+            "n_time_lost": 0,
+        }
+    else:
+        embedded, meta1 = stage1.fit_transform(X, ctx=ctx)
+    ctx.stage1_meta = meta1
+
+    print(f"[Stage 1] embedding={stage1_embedding!r} | "
+          f"in={meta1.get('input_shape', '-')} → out={meta1.get('output_shape', '-')}"
+          f" | {time.time() - t1:.2f}s")
+
+    # =====================================================================
+    # Stage 2 — Dynamics
+    # =====================================================================
+    t2 = time.time()
+    stage2 = build_stage2(stage2_dynamics, stage2_params)
+    Y2, meta2 = stage2.fit_transform(embedded, ctx=ctx, n_dim=n_dim)
+
+    # Empate 5.1 — complex outputs (DMD) are already real-valued inside
+    # the Stage-2 classes; enforce defensively at the handoff.
+    if np.iscomplexobj(Y2):
+        Y2 = np.real(Y2)
+
+    n_time_lost = int(meta1.get("n_time_lost", 0) or 0)
+    print(f"[Stage 2] dynamics={stage2_dynamics!r} (branch={meta2.get('branch', '-')}) | "
+          f"in={meta2.get('input_shape', '-')} → out={tuple(Y2.shape)}"
+          f" | {time.time() - t2:.2f}s")
+
+    # =====================================================================
+    # Stage 3 — Mode selection
+    # =====================================================================
+    t3 = time.time()
+    stage3 = build_stage3(stage3_selection, stage3_params)
+    Y_sel, meta3 = stage3.fit_transform(Y2, ctx=ctx, n_dim=n_dim)
+
+    # Final transpose: (n_dim, T') → (n_samples, n_dim)
+    latent = Y_sel.T
+    print(f"[Stage 3] selection={stage3_selection!r} | "
+          f"selected={meta3['selected_indices']} | latent={latent.shape}"
+          f" | {time.time() - t3:.2f}s")
 
     elapsed = time.time() - t0
 
+    # =====================================================================
+    # Metadata — pipeline traceability (Empate 6) + legacy keys
+    # =====================================================================
+    latent_scores: dict = {}
+    for key in (
+        "frequencies_hz", "damping_rates", "eigenvalues",
+        "continuous_eigenvalues", "eigenvalues_latent", "sigma_used",
+        "epsilon_fitted", "k_neighbors", "diffusion_time", "alpha",
+        "spectral_gap", "singular_values",
+    ):
+        if key in meta2:
+            latent_scores[key] = meta2[key]
+    if "eigenvalues" in meta2:
+        latent_scores["all_eigenvalues"] = meta2["eigenvalues"]
+    latent_scores.update(meta3.get("scores", {}))
+
+    n_samples_latent = latent.shape[0]
+    preprocessing: dict = {
+        "l_freq": l_freq,
+        "h_freq": h_freq,
+        "sfreq": sfreq,
+        "dt": dt,
+        "D": int(Y2.shape[0]),
+        "T": int(Y2.shape[1]),
+        "n_samples_latent": int(n_samples_latent),
+        "n_time_lost_by_embedding": n_time_lost,
+        "excluded_indices": meta2.get("excluded_indices", []),
+        "kept_indices": meta2.get("kept_indices", list(range(Y2.shape[0]))),
+    }
+    if X is not None:
+        preprocessing["n_channels"] = int(X.shape[0])
+        preprocessing["n_times"] = int(X.shape[1])
+        preprocessing["X_filtered"] = X
+    if stage1_embedding == "hankel":
+        preprocessing["embedding_depth"] = meta1.get("depth")
+        preprocessing["hankel_shape"] = meta1.get("output_shape")
+    if "singular_values" in meta2:
+        preprocessing["singular_values"] = meta2["singular_values"]
+    if "preprocessing" in meta2:  # full legacy Stage-I dict (MNE branch)
+        preprocessing["stage_I"] = meta2["preprocessing"]
+        preprocessing["n_channels"] = meta2["preprocessing"]["n_channels"]
+
     meta = {
-        "selected_indices": list(selected_idx),
-        "scoring_method": scoring_method,
-        "latent_scores": meta_scores,
-        "preprocessing": {
-            "D": D,
-            "T": T,
-            "sfreq": prep["sfreq"],
-            "n_channels": prep["n_channels"],
-            "excluded_indices": prep["excluded_indices"],
-            "kept_indices": prep["kept_indices"],
-            "Y": Y,               # clean component matrix for downstream reuse
+        # --- new pipeline traceability ---
+        "pipeline": {
+            "stage1": stage1_embedding,
+            "stage2": stage2_dynamics,
+            "stage3": stage3_selection,
+            "params": {
+                "stage1_params": _jsonable(stage1_params),
+                "stage2_params": _jsonable(stage2_params),
+                "stage3_params": _jsonable(stage3_params),
+            },
+            "chain": pipeline_str,
         },
-        "Y": Y,                   # also at top level for convenience
-        "Y_shape": (D, T),
+        "stage1": meta1,
+        "stage2": {k: v for k, v in meta2.items() if k != "preprocessing"},
+        "stage3": meta3,
+        # --- legacy top-level keys (do not break test_iga_...) ---
+        "selected_indices": list(meta3["selected_indices"]),
+        "scoring_method": legacy_method_used or pipeline_str,
+        "latent_scores": latent_scores,
+        "preprocessing": preprocessing,
+        "Y": Y2,
+        "Y_shape": tuple(Y2.shape),
         "elapsed_time": elapsed,
     }
 
+    print(f"\n[Pipeline] Done in {elapsed:.2f}s — latent shape {latent.shape}")
     return latent, meta
 
 
-# ---------------------------------------------------------------------------
-# Hankel+DMD branch (bypasses ICA / ICLabel / combinatorial selection)
-# ---------------------------------------------------------------------------
-
-def _extract_hankel_dmd_branch(
-    raw: mne.io.Raw,
-    *,
-    n_dim: int,
-    hankel_embedding_depth: int | None,
-    l_freq: float,
-    h_freq: float,
-    verbose: bool | str | None,
-    t0: float,
-) -> tuple[np.ndarray, dict]:
-    """
-    Execute the Hankel+DMD branch of the pipeline.
-
-    This bypasses ICA decomposition and ICLabel artifact rejection.
-    Only band-pass filtering is applied, then the Hankel+DMD module
-    extracts the latent space directly.
-    """
-    print(f"\n[Hankel-DMD] Bypassing ICA/ICLabel — using delay-embedding DMD")
-    print(f"[Hankel-DMD] Filter: {l_freq}-{h_freq} Hz | n_dim={n_dim}")
-
-    # 1. Apply only band-pass filtering, get data matrix
-    X, raw_filtered, sfreq = extract_filtered_data_matrix(
-        raw,
-        l_freq=l_freq,
-        h_freq=h_freq,
-        verbose=verbose,
-    )
-
-    n_ch, n_times = X.shape
-    print(f"[Hankel-DMD] Channels: {n_ch} | Time samples: {n_times} | sfreq: {sfreq:.1f} Hz")
-
-    # 2. Run Hankel+DMD to get latent space directly
-    latent, meta_hankel = extract_hankel_dmd_latent_space(
-        X,
-        n_dim=n_dim,
-        embedding_depth=hankel_embedding_depth,
-        sfreq=sfreq,
-    )
-
-    elapsed = time.time() - t0
-    meta_hankel["elapsed_time"] = elapsed
-
-    print(f"[Hankel-DMD] Latent shape: {latent.shape}")
-    print(f"[Hankel-DMD] Singular values: {meta_hankel['preprocessing']['singular_values']}")
-    print(f"[Hankel-DMD] DMD frequencies [Hz]: "
-          f"{[f'{f:.3f}' for f in meta_hankel['latent_scores']['frequencies_hz']]}")
-
-    return latent, meta_hankel
-
-
-def _extract_diffusion_maps_branch(
-    raw: mne.io.Raw,
-    *,
-    n_dim: int,
-    sigma: float | None,
-    k: int,
-    diffusion_time: float,
-    alpha: float,
-    l_freq: float,
-    h_freq: float,
-    verbose: bool | str | None,
-    t0: float,
-) -> tuple[np.ndarray, dict]:
-    """
-    Execute the Diffusion Maps branch of the pipeline.
-
-    This bypasses ICA decomposition and ICLabel artifact rejection.
-    Only band-pass filtering is applied, then the Diffusion Maps module
-    extracts the latent space directly from the filtered channel data.
-    """
-    print(f"\n[Diffusion Maps] Bypassing ICA/ICLabel — using Diffusion Maps (pyDiffMap)")
-    print(f"[Diffusion Maps] Filter: {l_freq}-{h_freq} Hz | n_dim={n_dim} | "
-          f"sigma={'auto(bgh)' if sigma is None else sigma} | k={k} | "
-          f"t={diffusion_time} | alpha={alpha}")
-
-    # 1. Apply only band-pass filtering, get data matrix
-    X, raw_filtered, sfreq = extract_filtered_data_matrix(
-        raw,
-        l_freq=l_freq,
-        h_freq=h_freq,
-        verbose=verbose,
-    )
-
-    n_ch, n_times = X.shape
-    print(f"[Diffusion Maps] Channels: {n_ch} | Time samples: {n_times} | sfreq: {sfreq:.1f} Hz")
-
-    # 2. Run Diffusion Maps
-    latent, dm_meta = extract_diffusion_maps_latent_space(
-        X=X,
-        n_dim=n_dim,
-        sigma=sigma,
-        k=k,
-        diffusion_time=diffusion_time,
-        alpha=alpha,
-        sfreq=sfreq,
-    )
-
-    # 3. Build pipeline-compatible metadata dict
-    meta = {
-        "selected_indices": list(range(n_dim)),
-        "scoring_method": "diffusion_maps",
-        "latent_scores": {
-            "eigenvalues": dm_meta.get("eigenvalues_latent", []),
-            "all_eigenvalues": dm_meta.get("eigenvalues", []),
-            "sigma_used": dm_meta.get("sigma_used"),
-            "epsilon_fitted": dm_meta.get("epsilon_fitted"),
-            "k_neighbors": dm_meta.get("k_neighbors"),
-            "diffusion_time": dm_meta.get("diffusion_time"),
-            "alpha": dm_meta.get("alpha"),
-            "spectral_gap": dm_meta.get("spectral_gap"),
-        },
-        "preprocessing": {
-            "l_freq": l_freq,
-            "h_freq": h_freq,
-            "sfreq": sfreq,
-        },
-        "elapsed_time": time.time() - t0,
-        "diffusion_maps_meta": dm_meta,
-    }
-
-    print(f"[Diffusion Maps] Latent shape: {latent.shape}")
-    print(f"[Diffusion Maps] Spectral gap: {dm_meta.get('spectral_gap')}")
-    print(f"[Diffusion Maps] Sigma used: {dm_meta.get('sigma_used')}")
-    print(f"[Diffusion Maps] Completed in {meta['elapsed_time']:.2f}s")
-
-    return latent, meta
+def _jsonable(params: dict) -> dict:
+    """Convert a params dict into a JSON/cache-friendly copy."""
+    out = {}
+    for k, v in params.items():
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            out[k] = v
+        elif isinstance(v, (list, tuple)):
+            out[k] = list(v)
+        else:
+            out[k] = repr(v)
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Quick sampled conservative-fraction diagnostic
+# Quick sampled conservative-fraction diagnostic (legacy, kept for compat)
 # ---------------------------------------------------------------------------
 
 def sample_conservative_fraction(
@@ -581,40 +570,13 @@ def sample_conservative_fraction(
 ) -> dict:
     """
     Evaluate the conservative fraction on the first *n_samples* combinations
-    of *n_dim* components.
-
-    This is a lightweight diagnostic to check whether the conservative
-    fraction discriminates on a given dataset without running the full
-    exhaustive search.
-
-    Parameters
-    ----------
-    Y : np.ndarray, shape (D, T)
-        Clean component matrix (output of Stage I).
-    n_dim : int
-        Subspace dimensionality.
-    n_samples : int, default 500
-        Number of combinations to evaluate.
-    metric : str, default ``"variance_sum"``
-        Conservative-fraction metric to use.
-    n_workers : int or None, optional
-        Parallel processes.
-
-    Returns
-    -------
-    report : dict
-        Keys:
-
-        * ``"fc_values"``     — array of all computed fc values.
-        * ``"combinations"``  — list of evaluated combinations.
-        * ``"min"`` / ``"max"`` / ``"range"`` / ``"mean"`` / ``"std"`` / ``"cv"``
-          — descriptive statistics.
-        * ``"constant"``      — ``True`` if all values are identical
-          (within machine precision).
-        * ``"degenerate"``    — ``True`` if CV < 1e-6.
+    of *n_dim* components (legacy diagnostic, kept for compatibility).
     """
     from itertools import combinations
-    import math
+
+    from src.latent_space_extraction.conservative_fraction import (
+        score_many_combinations_fc,
+    )
 
     D, T = Y.shape
     all_combs = list(combinations(range(D), n_dim))
@@ -662,151 +624,8 @@ def sample_conservative_fraction(
 
 
 # ---------------------------------------------------------------------------
-# Internal selection helpers
-# ---------------------------------------------------------------------------
-
-def _select_markov(
-    Y: np.ndarray,
-    n_dim: int,
-    n_bins: int,
-    use_greedy: bool,
-    n_workers: int | None,
-    maximize: bool = False,
-) -> tuple[tuple[int, ...], dict]:
-    """Select subspace by minimising Markov relaxation time."""
-    if use_greedy:
-        comb, tau = greedy_forward_selection_markov(Y, n_dim, n_bins=n_bins, maximize=maximize)
-        comb = tuple(comb)
-    else:
-        comb, tau = find_best_subspace_markov(
-            Y, n_dim, n_bins=n_bins, n_workers=n_workers, maximize=maximize
-        )
-    return comb, {"tau": float(tau), "search": "greedy" if use_greedy else "exhaustive"}
-
-
-def _select_conservative(
-    Y: np.ndarray,
-    n_dim: int,
-    fc_metric: str,
-    use_greedy: bool,
-    n_workers: int | None,
-) -> tuple[tuple[int, ...], dict]:
-    """Select subspace by maximising conservative fraction."""
-    if use_greedy:
-        comb, fc = greedy_forward_selection_fc(Y, n_dim, metric=fc_metric)
-        comb = tuple(comb)
-    else:
-        comb, fc = find_best_subspace_fc(
-            Y, n_dim, metric=fc_metric, n_workers=n_workers
-        )
-    return comb, {"fc": float(fc), "metric": fc_metric,
-                  "search": "greedy" if use_greedy else "exhaustive"}
-
-
-def _select_weighted(
-    Y: np.ndarray,
-    n_dim: int,
-    alpha: float,
-    fc_metric: str,
-    n_bins: int,
-    use_greedy: bool,
-    n_workers: int | None,
-) -> tuple[tuple[int, ...], dict]:
-    """Select subspace via weighted scalarisation."""
-    result = weighted_score_selection(
-        Y, n_dim,
-        alphas=[alpha],
-        metric=fc_metric,
-        n_bins=n_bins,
-        n_workers=n_workers,
-        search_strategy="greedy" if use_greedy else "exhaustive",
-    )
-    comb = result["best_combinations"][0]
-    return comb, {
-        "alpha": float(alpha),
-        "score": float(result["best_scores"][0]),
-        "fc": float(result["fc_values"][0]),
-        "tau": float(result["tau_values"][0]),
-    }
-
-
-def _select_sequential(
-    Y: np.ndarray,
-    n_dim: int,
-    primary: str,
-    K: int | None,
-    fc_metric: str,
-    n_bins: int,
-    n_workers: int | None,
-) -> tuple[tuple[int, ...], dict]:
-    """Select subspace via sequential filtering."""
-    D = Y.shape[0]
-    if K is None:
-        import math
-        K = min(20, max(5, int(np.prod([D - i for i in range(n_dim)]) / math.factorial(n_dim) * 0.05)))
-        K = max(K, 5)
-
-    result = sequential_filtering_selection(
-        Y, n_dim, K=K, primary=primary,
-        metric=fc_metric, n_bins=n_bins, n_workers=n_workers,
-    )
-    comb = result["best_combination"]
-    return comb, {
-        "primary": primary,
-        "K": K,
-        "fc": result["best_fc"],
-        "tau": result["best_tau"],
-    }
-
-
-def _select_pareto(
-    Y: np.ndarray,
-    n_dim: int,
-    fc_metric: str,
-    n_bins: int,
-    n_workers: int | None,
-) -> tuple[tuple[int, ...], dict]:
-    """Select the first point on the Pareto frontier (best trade-off)."""
-    result = pareto_frontier_selection(
-        Y, n_dim, metric=fc_metric, n_bins=n_bins, n_workers=n_workers,
-    )
-    comb = result["frontier_combinations"][0]
-    return comb, {
-        "frontier_size": int(result["frontier_size"]),
-        "fc": float(result["frontier_fc"][0]),
-        "tau": float(result["frontier_tau"][0]),
-    }
-
-
-def _select_independent(
-    Y: np.ndarray,
-    n_dim: int,
-    fc_metric: str,
-    n_bins: int,
-    use_greedy: bool,
-    n_workers: int | None,
-) -> tuple[tuple[int, ...], dict]:
-    """Run both criteria, return the Markov winner (empirically better)."""
-    result = independent_selection(
-        Y, n_dim,
-        metric=fc_metric,
-        n_bins=n_bins,
-        n_workers=n_workers,
-        fc_search="greedy" if use_greedy else "exhaustive",
-        markov_search="greedy" if use_greedy else "exhaustive",
-    )
-    # Return Markov winner — it discriminates better than FC
-    comb = result["markov_combination"]
-    return comb, {
-        "fc_combination": result["fc_combination"],
-        "fc_value": result["fc_value"],
-        "markov_combination": result["markov_combination"],
-        "markov_tau": result["markov_tau"],
-    }
-
-
-# ---------------------------------------------------------------------------
 # Diagnostic: does the dataset support discriminative subspace selection?
+# (legacy, kept for compatibility)
 # ---------------------------------------------------------------------------
 
 def diagnose_subspace_discrimination(
@@ -820,44 +639,17 @@ def diagnose_subspace_discrimination(
 ) -> dict:
     """
     Exhaustively evaluate *all* combinations and report whether each
-    criterion discriminates on this dataset.
-
-    For each metric the function reports:
-        * min / max / range / std / CV
-        * a discrimination verdict (``True`` if CV > *cv_threshold*)
-
-    It ends with a recommended scoring method based on the evidence.
-
-    Parameters
-    ----------
-    Y : np.ndarray, shape (D, T)
-        Clean component matrix (output of Stage I).
-    n_dim : int, default 2
-        Subspace dimensionality to evaluate.
-    fc_metrics : list of str, optional
-        Conservative-fraction metrics to test. Defaults to all three.
-    n_bins : int, default 5
-        Quantile bins for Markov discretisation.
-    n_workers : int or None, optional
-        Parallel processes.
-    cv_threshold : float, default 0.05
-        A criterion is considered "discriminative" if its coefficient of
-        variation (std / mean) exceeds this value.
-
-    Returns
-    -------
-    report : dict
-        Structured results ready for inspection or logging. Key fields:
-
-        * ``"conservative_fraction"`` — dict per metric with
-          ``discriminates`` (bool), ``min``, ``max``, ``range``, ``std``,
-          ``cv``, ``best_comb``, ``worst_comb``.
-        * ``"markov_time"`` — same structure for tau.
-        * ``"recommendation"`` — suggested scoring method and rationale.
-        * ``"n_combinations_evaluated"`` — total combos tested.
+    criterion discriminates on this dataset (legacy diagnostic, kept for
+    compatibility).
     """
     from itertools import combinations
-    import math
+
+    from src.latent_space_extraction.conservative_fraction import (
+        score_many_combinations_fc,
+    )
+    from src.latent_space_extraction.markov_subspace import (
+        score_many_combinations_markov,
+    )
 
     if fc_metrics is None:
         fc_metrics = ["variance_sum", "first_pc_var", "total_variance"]
@@ -878,9 +670,6 @@ def diagnose_subspace_discrimination(
         "recommendation": {},
     }
 
-    # ===================================================================
-    # Conservative fraction — all metrics
-    # ===================================================================
     print("=" * 60)
     print("  CONSERVATIVE FRACTION ANALYSIS")
     print("=" * 60)
@@ -890,7 +679,6 @@ def diagnose_subspace_discrimination(
             Y, all_combs, metric=metric, n_workers=n_workers, show_progress=False
         )
         fc_values = np.array([fc for _, fc in sorted(scored, key=lambda x: x[0])])
-        # Sort by combination to align with markov later
 
         vmin, vmax = float(fc_values.min()), float(fc_values.max())
         vrange = vmax - vmin
@@ -926,9 +714,6 @@ def diagnose_subspace_discrimination(
         print(f"    Worst  : {all_combs[worst_idx]} (fc={vmin:.6f})")
         print(f"    Discriminates? {verdict} (CV threshold = {cv_threshold})")
 
-    # ===================================================================
-    # Markov time
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  MARKOV TIME ANALYSIS")
     print("=" * 60)
@@ -938,7 +723,6 @@ def diagnose_subspace_discrimination(
     )
     tau_values = np.array([tau for _, tau in sorted(scored_tau, key=lambda x: x[0])])
 
-    # Filter out inf values for statistics
     tau_finite = tau_values[np.isfinite(tau_values)]
     n_inf = int(np.sum(~np.isfinite(tau_values)))
 
@@ -952,7 +736,7 @@ def diagnose_subspace_discrimination(
         vmin_tau = vmax_tau = vrange_tau = vmean_tau = vstd_tau = cv_tau = float("nan")
 
     discriminates_tau = cv_tau > cv_threshold
-    best_idx_tau = int(np.argmin(tau_values))  # min tau = best
+    best_idx_tau = int(np.argmin(tau_values))
     worst_idx_tau = int(np.argmax(np.where(np.isfinite(tau_values), tau_values, -np.inf)))
 
     report["markov_time"] = {
@@ -981,9 +765,6 @@ def diagnose_subspace_discrimination(
     print(f"    Worst    : {all_combs[worst_idx_tau]} (tau={tau_values[worst_idx_tau]:.6f})")
     print(f"    Discriminates? {verdict_tau} (CV threshold = {cv_threshold})")
 
-    # ===================================================================
-    # Recommendation
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  RECOMMENDATION")
     print("=" * 60)
@@ -995,109 +776,31 @@ def diagnose_subspace_discrimination(
     if discriminates_tau and not fc_discriminates_any:
         method = "markov"
         rationale = (
-            "Markov time discriminates strongly (CV={cv:.3f}) while "
-            "conservative fraction does not across all metrics. "
-            "Use 'markov' as the primary scoring method."
-        ).format(cv=cv_tau)
+            f"Markov time discriminates strongly (CV={cv_tau:.3f}) while "
+            f"conservative fraction does not across all metrics. "
+            f"Use 'markov' as the primary scoring method."
+        )
     elif fc_discriminates_any and not discriminates_tau:
         method = "conservative"
-        best_fc_metric = max(
-            report["conservative_fraction"].items(),
-            key=lambda kv: kv[1]["cv"],
-        )[0]
         rationale = (
-            "Conservative fraction discriminates (CV above threshold) while "
-            "Markov time does not. Use 'conservative' with "
-            f"fc_metric='{best_fc_metric}'."
+            "Conservative fraction discriminates but Markov time does not. "
+            "Use 'conservative' or a weighted strategy."
         )
     elif discriminates_tau and fc_discriminates_any:
         method = "weighted"
         rationale = (
-            "Both criteria discriminate. Use 'weighted' with alpha=0.5 "
-            "to balance variance retention and dynamical speed, "
-            "or 'pareto' to explore the trade-off frontier."
+            "Both criteria discriminate. Consider 'weighted' or 'pareto' "
+            "to exploit their complementarity."
         )
     else:
         method = "markov"
         rationale = (
             "Neither criterion discriminates strongly on this dataset. "
-            "Defaulting to 'markov' as it tends to be more robust "
-            "when the signal has rich temporal structure."
+            "Default to 'markov' (empirically robust)."
         )
 
-    report["recommendation"] = {
-        "method": method,
-        "rationale": rationale,
-        "fc_discriminates_any": fc_discriminates_any,
-        "markov_discriminates": discriminates_tau,
-    }
-
-    print(f"\n  Proposed scoring method : {method}")
-    print(f"  Rationale               : {rationale}\n")
+    report["recommendation"] = {"method": method, "rationale": rationale}
+    print(f"\n  Recommended scoring method: {method}")
+    print(f"  Rationale: {rationale}\n")
 
     return report
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point (optional, for quick testing)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Extract latent subspace from EEG"
-    )
-    parser.add_argument("--file", type=str, default=None,
-                        help="Path to raw EEG file (uses MNE sample data if omitted)")
-    parser.add_argument("--n-dim", type=int, default=2,
-                        help="Target dimensionality (default: 2)")
-    parser.add_argument("--method", type=str, default="markov",
-                        choices=["markov", "conservative", "weighted",
-                                 "sequential", "pareto", "independent",
-                                 "hankel_dmd"],
-                        help="Scoring method (default: markov)")
-    parser.add_argument("--fc-metric", type=str, default="variance_sum",
-                        choices=["variance_sum", "first_pc_var", "total_variance"])
-    parser.add_argument("--n-bins", type=int, default=5)
-    parser.add_argument("--alpha", type=float, default=None)
-    parser.add_argument("--hankel-embedding-depth", type=int, default=None,
-                        help="Hankel embedding depth T (only for hankel_dmd method)")
-    parser.add_argument("--workers", type=int, default=None)
-    parser.add_argument("--greedy", action="store_true")
-
-    args = parser.parse_args()
-
-    if args.file:
-        raw_input = args.file
-    else:
-        raw_input = load_sample_mne_data()
-
-    search = "greedy" if args.greedy else "exhaustive"
-
-    print(f"Extracting {args.n_dim}-D latent space using '{args.method}'...")
-
-    # Build kwargs dynamically (hankel_dmd ignores some params)
-    kwargs = dict(
-        n_dim=args.n_dim,
-        scoring_method=args.method,
-        fc_metric=args.fc_metric,
-        n_bins=args.n_bins,
-        alpha=args.alpha,
-        search_strategy=search,
-        n_workers=args.workers,
-    )
-    if args.method == "hankel_dmd":
-        kwargs["hankel_embedding_depth"] = args.hankel_embedding_depth
-        # Remove ICA-irrelevant params for clarity
-        kwargs.pop("fc_metric", None)
-        kwargs.pop("n_bins", None)
-        kwargs.pop("alpha", None)
-        kwargs.pop("search_strategy", None)
-
-    latent, meta = extract_latent_space(raw_input, **kwargs)
-
-    print(f"\nLatent space shape: {latent.shape}")
-    print(f"Selected components: {meta['selected_indices']}")
-    print(f"Scores: {meta['latent_scores']}")
-    print(f"Total time: {meta['elapsed_time']:.1f} s")
