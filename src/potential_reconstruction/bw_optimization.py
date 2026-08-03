@@ -511,9 +511,15 @@ def optimal_bw(data, bins, dt=1.0, p=2, kernel='epanechnikov',
             if D == 2:
                 X, Y = np.meshgrid(edges_opt[0], edges_opt[1], indexing='ij')
                 U_plot = np.nan_to_num(U_opt, nan=np.nanmedian(U_opt))
-                levels = np.linspace(U_plot.min(), U_plot.max(), 20)
-                cnt = ax.contourf(X, Y, U_plot, levels=levels, cmap='viridis')
-                plt.colorbar(cnt, ax=ax, label='U')
+                u_min, u_max = float(U_plot.min()), float(U_plot.max())
+                if u_max - u_min < 1e-12:
+                    ax.text(0.5, 0.5, f"Constant U = {u_min:.4g}",
+                            ha="center", va="center", transform=ax.transAxes,
+                            fontsize=10, color="gray")
+                else:
+                    levels = np.linspace(u_min, u_max, 20)
+                    cnt = ax.contourf(X, Y, U_plot, levels=levels, cmap='viridis')
+                    plt.colorbar(cnt, ax=ax, label='U')
                 ax.set_aspect('equal', adjustable='box')
                 ax.set_xlabel('x')
                 ax.set_ylabel('y')
@@ -606,9 +612,15 @@ def optimal_bw(data, bins, dt=1.0, p=2, kernel='epanechnikov',
             if D == 2:
                 X, Y = np.meshgrid(edges_opt[0], edges_opt[1], indexing='ij')
                 U_plot = np.nan_to_num(U_opt, nan=np.nanmedian(U_opt))
-                levels = np.linspace(U_plot.min(), U_plot.max(), 20)
-                cnt = ax.contourf(X, Y, U_plot, levels=levels, cmap='viridis')
-                plt.colorbar(cnt, ax=ax, label='U')
+                u_min, u_max = float(U_plot.min()), float(U_plot.max())
+                if u_max - u_min < 1e-12:
+                    ax.text(0.5, 0.5, f"Constant U = {u_min:.4g}",
+                            ha="center", va="center", transform=ax.transAxes,
+                            fontsize=10, color="gray")
+                else:
+                    levels = np.linspace(u_min, u_max, 20)
+                    cnt = ax.contourf(X, Y, U_plot, levels=levels, cmap='viridis')
+                    plt.colorbar(cnt, ax=ax, label='U')
                 ax.set_aspect('equal', adjustable='box')
                 ax.set_xlabel('x')
                 ax.set_ylabel('y')
