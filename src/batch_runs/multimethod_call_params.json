@@ -22,7 +22,8 @@
       "stage1_params": {},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
-        "ica_method": "picard"
+        "ica_method": "picard",
+        "n_components": 20
       },
       "stage3_selection": "markov_fastest",
       "stage3_params": {
@@ -36,7 +37,8 @@
       "stage1_params": {},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
-        "ica_method": "picard"
+        "ica_method": "picard",
+        "n_components": 20
       },
       "stage3_selection": "markov_slowest",
       "stage3_params": {
@@ -71,7 +73,8 @@
       "stage1_params": {},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
-        "ica_method": "picard"
+        "ica_method": "picard",
+        "n_components": 20
       },
       "stage3_selection": "markov_fastest",
       "stage3_params": {
@@ -85,7 +88,8 @@
       "stage1_params": {},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
-        "ica_method": "picard"
+        "ica_method": "picard",
+        "n_components": 20
       },
       "stage3_selection": "markov_slowest",
       "stage3_params": {
