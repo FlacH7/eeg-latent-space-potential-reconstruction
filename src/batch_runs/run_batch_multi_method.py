@@ -144,7 +144,7 @@ else:
 # ---------------------------------------------------------------------------
 # Ruta por defecto del JSON de parametros
 # ---------------------------------------------------------------------------
-DEFAULT_PARAMS_JSON = Path("multimethod_call_params.json")
+DEFAULT_PARAMS_JSON = Path("./src/batch_runs/multimethod_call_params.json")
 
 # ---------------------------------------------------------------------------
 # Lectura del JSON de parametros
