@@ -192,6 +192,9 @@ def _parse_args() -> argparse.Namespace:
     # ---- Output ----
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory to save plots (default: current)")
+        # ---- Kramers-Moyal bins ----
+    parser.add_argument("--km-bins", type=int, default=40,
+                        help="Number of bins per dimension for KM estimation (default: 40)")
     # ---- Save potential ----
     parser.add_argument("--save-potential", action="store_true", default=True,
                         help="Guardar datos del potencial en .npz para post-procesamiento")
@@ -519,7 +522,7 @@ def main() -> int:
     config.update({
         "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{spec_label}",
         "D": D,
-        "bins": [40] * D,
+        "bins": [args.km_bins] * D,
         "drift_components": list(range(D)),
         "diff_components": [(i, i) for i in range(D)],
         "degree": 2,

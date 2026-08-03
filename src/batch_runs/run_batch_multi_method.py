@@ -144,7 +144,7 @@ else:
 # ---------------------------------------------------------------------------
 # Ruta por defecto del JSON de parametros
 # ---------------------------------------------------------------------------
-DEFAULT_PARAMS_JSON = Path("./src/batch_runs/multimethod_call_params.json")
+DEFAULT_PARAMS_JSON = Path(BASE_PARAMS_FILE) / "multimethod_call_params.json"
 
 # ---------------------------------------------------------------------------
 # Lectura del JSON de parametros
@@ -443,7 +443,11 @@ class MultiMethodBatchRunner:
     def _get_output_dir(self, job: dict) -> Path:
         """Devuelve el directorio de salida donde el orquestador guarda resultados.
 
-        Patron del orquestador nuevo:
+        En vez de calcular el spec_hash localmente (lo cual falla porque el
+        orquestador inyecta defaults del CLI antes de hashear), busca en
+        disco la carpeta que coincida con el ``spec_label``.
+
+        Patron del orquestador:
         ``test_retest_gedai/{subject}/{session}/
          {latent_dim}_latent_dim_{spec_label}_{spec_hash}/
          from{t_start}s_to_{t_end}s_{task}``
@@ -452,16 +456,45 @@ class MultiMethodBatchRunner:
         shared = job["shared"]
         latent_dim = shared.get("latent_dim", 2)
         spec_label = _spec_label(method)
-        spec_hash = _spec_hash(method, shared)
 
-        return (
+        session_dir = (
             self.output_dir
             / "test_retest_gedai"
             / job["subject"]
             / job["session"]
-            / f"{latent_dim}_latent_dim_{spec_label}_{spec_hash}"
-            / f"from{job['t_start']}s_to_{job['t_end']}s_{job['task']}"
         )
+
+        # Buscar la carpeta del metodo por spec_label (ignorando el hash)
+        prefix = f"{latent_dim}_latent_dim_{spec_label}_"
+        if session_dir.is_dir():
+            candidates = [
+                d for d in session_dir.iterdir()
+                if d.is_dir() and d.name.startswith(prefix)
+            ]
+            if len(candidates) == 1:
+                method_dir = candidates[0]
+            elif len(candidates) > 1:
+                # Multiples matches: intentar resolver por t_start/t_end/task
+                task_sub = f"from{job['t_start']}s_to_{job['t_end']}s_{job['task']}"
+                for c in candidates:
+                    if (c / task_sub).is_dir():
+                        method_dir = c
+                        break
+                else:
+                    # Fallback: usar la mas reciente
+                    method_dir = max(candidates, key=lambda p: p.stat().st_mtime)
+                    logger.warning(
+                        "Multiples carpetas para %s, usando la mas reciente: %s",
+                        spec_label, method_dir.name,
+                    )
+            else:
+                # No encontrada: retornar path estimado para que el warning
+                # del post-procesamiento muestre que falta
+                method_dir = session_dir / f"{prefix}????????"
+        else:
+            method_dir = session_dir / f"{prefix}????????"
+
+        return method_dir / f"from{job['t_start']}s_to_{job['t_end']}s_{job['task']}"
 
     # ------------------------------------------------------------------
     # Construccion del comando (nueva API 3 etapas)
@@ -539,6 +572,10 @@ class MultiMethodBatchRunner:
                 val = shared.get(dkey)
                 if val is not None:
                     cmd.extend([dflag, str(val)])
+
+        # --- KM bins ---
+        if shared.get("km_bins") is not None:
+            cmd.extend(["--km-bins", str(shared["km_bins"])])
 
         # --- Flags booleanos ---
         if shared.get("ignore_cache", False) or self.ignore_cache:
@@ -881,11 +918,17 @@ class MultiMethodBatchRunner:
                 fontsize=14, fontweight="bold", y=1.01,
             )
 
-            # --- Guardar con nombre dinamico ---
-            save_dir = self._get_output_dir(jobs[0]).parent
+            # --- Guardar en subcarpeta methods_comparison a nivel de sesion ---
+            save_dir = (
+                self.output_dir
+                / "test_retest_gedai"
+                / subject
+                / session
+                / "methods_comparison"
+            )
+            save_dir.mkdir(parents=True, exist_ok=True)
             composite_name = f"{self.composite_prefix}_{subject}_{session}_{task}.png"
             save_path = save_dir / composite_name
-            save_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
                 fig.savefig(

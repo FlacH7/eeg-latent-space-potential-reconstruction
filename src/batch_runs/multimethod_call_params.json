@@ -139,7 +139,8 @@
     "fc_metric": "variance_sum",
     "n_bins": 10,
     "workers": null,
-    "search_strategy": "exhaustive"
+    "search_strategy": "exhaustive",
+    "km_bins":40
   },
 
   "execution": {
