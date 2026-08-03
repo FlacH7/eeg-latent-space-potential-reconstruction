@@ -2,80 +2,90 @@
 """
 run_batch_multi_method.py
 ===========================
-Ejecutor de batch multi-metodo para el pipeline IgA sobre el dataset
-test-retest preprocesado con **Gedai** (formato EEGLAB .set/.fdt).
+Ejecutor de batch multi-metodo para el pipeline IgA (version nueva con API de 3 etapas).
 
-A diferencia de ``run_batch_iga_test_retest_gedai.py``, este script:
+A diferencia de la version anterior, este script:
 
-1. **Itera sobre multiples scoring-methods** en cada corrida (por defecto
-   markov, markov_inverted, hankel_dmd, diffusion_maps), generando un
-   resultado independiente por metodo.
+1. **Lee toda la configuracion desde un JSON** (``multimethod_call_params.json``),
+   lo que permite cambiar sujetos, sesiones, tareas, metodos y parametros de
+   pipeline sin tocar el codigo.
 
-2. **Permite parametrizar** el rango de sujetos, las sesiones a procesar,
-   las tareas y los metodos, haciendolo escalable.
+2. **Usa la nueva API del orquestador** (``--stage1-embedding``,
+   ``--stage2-dynamics``, ``--stage3-selection`` y sus respectivos
+   ``--stageX-params``) en lugar del legacy ``--scoring-method``.
 
 3. **Post-procesamiento automatico**: al finalizar todas las corridas,
-   genera graficos compuestos de 2 filas x N columnas por cada
+   genera graficos compuestos en forma de **matriz** por cada
    (sujeto, sesion, tarea), donde:
-   - Cada **columna** corresponde a un metodo.
-   - La **fila 1** muestra el potencial 2D (``potential_2d.png``).
-   - La **fila 2** muestra la fuerza no-conservativa / rotacional
-     (``potential_2d_nonconservative_force.png``).
+   - **Columnas** = combinaciones unicas de (stage2_dynamics, stage3_selection).
+   - **Filas** = grupos de stage1_embedding (con/sin embedding), cada grupo
+     con 2 sub-filas: potencial 2D y fuerza no-conservativa.
+   - Ejemplo con 4 combos de stage2/3 y 2 grupos de embedding (hankel, none):
+     una matriz 4x4 donde las filas 1-2 son con hankel y las 3-4 sin hankel.
+
+   El layout se adapta automaticamente a cualquier numero de metodos,
+   combinaciones de stage2/3 y grupos de embedding.
 
    Los graficos se nombran dinamicamente incluyendo sujeto, sesion y tarea:
    ``methods_comparison_{subject}_{session}_{task}.png``
 
 Configuracion
 --------------
-Todo se controla mediante variables de entorno (o los defaults del script):
+Todo se controla mediante el archivo JSON (por defecto en
+``BASE_PARAMS_FILE / multimethod_call_params.json``). Los campos del JSON son:
 
-BATCH_MM_PARAMS_FILE     : Archivo .txt/.csv de parametros externo.
-BATCH_MM_SUBJ_START      : Indice inicial de sujeto (default: 1)
-BATCH_MM_SUBJ_END        : Indice final de sujeto inclusive (default: 5)
-BATCH_MM_SESSIONS        : Lista JSON de sesiones (default: ["session1"])
-BATCH_MM_TASKS           : Lista JSON de tareas (default: las 5)
-BATCH_MM_METHODS         : Lista JSON de metodos (default: los 4)
-BATCH_MM_T_START/T_END   : Ventana temporal (default: 0.0 / 300.0)
-BATCH_MM_DB_PATH         : Ruta a la base de datos Gedai
-BATCH_MM_OUTPUT_DIR      : Directorio base de resultados
-BATCH_MM_CACHE_DIR       : Directorio base de cache
-BATCH_MM_LATENT_DIM      : Dimension del espacio latente (default: 2)
-BATCH_MM_ICA_METHOD      : Metodo ICA (default: picard)
-BATCH_MM_L_FREQ/H_FREQ   : Frecuencias de filtro (default: 1.0 / 40.0)
-BATCH_MM_MAX_WORKERS     : Workers paralelos (default: 1, secuencial)
-BATCH_MM_DELAY           : Pausa entre ejecuciones (default: 2.0 s)
-BATCH_MM_IGNORE_CACHE    : Forzar recalculo (default: false)
-BATCH_MM_RUN_POSTPROCESS : Ejecutar post-proc (default: true)
-BATCH_MM_LOG_LEVEL       : Nivel de logging (default: INFO)
+```json
+{
+  "pipeline_module": "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai",
+  "subjects": { "start": 1, "end": 5 },
+  "sessions": ["session1"],
+  "tasks": ["eyesclosed", ...],
+  "time_window": { "t_start": 0.0, "t_end": 300.0 },
+  "methods": [
+    {
+      "label": "hankel_dmd",
+      "stage1_embedding": "hankel",
+      "stage1_params": {},
+      "stage2_dynamics": "dmd",
+      "stage2_params": {},
+      "stage3_selection": "top_n",
+      "stage3_params": {}
+    }
+  ],
+  "shared_params": { ... },
+  "execution": { "delay": 2.0, "max_workers": 1, ... },
+  "postprocess": { ... }
+}
+```
+
+Tambien se puede sobreescribir la ruta del JSON con la variable de entorno:
+  ``BATCH_MM_PARAMS_JSON``
 
 Uso
 ---
 Desde la raiz del proyecto::
 
-    # Usando defaults (sub-01..sub-05, session1, 4 metodos, 5 tareas -> 100 runs)
+    # Usando defaults (lee el JSON de BASE_PARAMS_FILE)
     python -m src.batch_runs.run_batch_multi_method
 
-    # Personalizando via entorno
-    export BATCH_MM_SUBJ_END=10
-    export BATCH_MM_METHODS='["markov", "hankel_dmd"]'
-    python -m src.batch_runs.run_batch_multi_method
+    # Apuntando a otro JSON
+    BATCH_MM_PARAMS_JSON=/path/to/other.json python -m src.batch_runs.run_batch_multi_method
 
-    # Usando archivo de parametros externo (comportamiento clasico)
-    export BATCH_MM_PARAMS_FILE=/ruta/a/mis_params.txt
-    python -m src.batch_runs.run_batch_multi_method
+    # Cambiar log level
+    BATCH_MM_LOG_LEVEL=DEBUG python -m src.batch_runs.run_batch_multi_method
 """
 
 from __future__ import annotations
 
-import ast
+import argparse
 import csv
+import hashlib
 import json
 import logging
 import os
 import subprocess
 import sys
 import time
-import traceback
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -131,108 +141,67 @@ if not logging_path:
 else:
     os.makedirs(logging_path, exist_ok=True)
 
-# ===========================================================================
-# DEFAULTS ESCALABLES
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Ruta por defecto del JSON de parametros
+# ---------------------------------------------------------------------------
+DEFAULT_PARAMS_JSON = "multimethod_call_params.json"
 
-DEFAULT_TASKS = ["eyesclosed", "eyesopen", "mathematic", "memory", "music"]
-DEFAULT_METHODS = ["markov", "markov_inverted", "hankel_dmd", "diffusion_maps"]
-DEFAULT_SESSIONS = ["session1"]
-
-# ===========================================================================
-# HELPERS de lectura de entorno
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Lectura del JSON de parametros
+# ---------------------------------------------------------------------------
 
 
-def _env(var: str, default: str | None = None) -> str | None:
-    return os.environ.get(var, default)
+def _load_params(json_path: Path) -> dict:
+    """Carga y valida el JSON de parametros del batch."""
+    if not json_path.exists():
+        logger.error("Archivo JSON de parametros no encontrado: %s", json_path)
+        sys.exit(1)
+
+    with open(json_path, "r", encoding="utf-8") as fh:
+        params = json.load(fh)
+
+    # Validaciones minimas
+    required_top_keys = ["subjects", "sessions", "tasks", "methods", "shared_params"]
+    for key in required_top_keys:
+        if key not in params:
+            logger.error("Falta la clave requerida '%s' en el JSON", key)
+            sys.exit(1)
+
+    for method in params["methods"]:
+        for req_key in ("label", "stage2_dynamics", "stage3_selection"):
+            if req_key not in method:
+                logger.error(
+                    "El metodo '%s' falta la clave requerida '%s'",
+                    method.get("label", "<sin label>"), req_key,
+                )
+                sys.exit(1)
+
+    return params
 
 
-def _env_bool(var: str, default: bool = False) -> bool:
-    val = os.environ.get(var, "").strip().lower()
-    return val in ("1", "true", "yes", "on") if val else default
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-def _env_float(var: str, default: float) -> float:
-    try:
-        return float(os.environ[var])
-    except (KeyError, ValueError):
-        return default
+def _spec_label(method: dict) -> str:
+    """Genera el label de spec igual que el orquestador: s1+s2+s3."""
+    s1 = method.get("stage1_embedding") or "none"
+    return f"{s1}+{method['stage2_dynamics']}+{method['stage3_selection']}"
 
 
-def _env_int(var: str, default: int) -> int:
-    try:
-        return int(os.environ[var])
-    except (KeyError, ValueError):
-        return default
-
-
-def _env_json_list(var: str, default: list) -> list:
-    """Lee una variable de entorno como lista JSON. Si falla, devuelve default."""
-    val = os.environ.get(var, "").strip()
-    if not val:
-        return default
-    try:
-        parsed = json.loads(val)
-        if isinstance(parsed, list):
-            return parsed
-    except (json.JSONDecodeError, TypeError):
-        pass
-    return default
-
-
-# ===========================================================================
-# CONFIGURACION GLOBAL
-# ===========================================================================
-
-# --- Rango de sujetos (parametrizable) ---
-SUBJ_START: int = _env_int("BATCH_MM_SUBJ_START", 1)
-SUBJ_END: int = _env_int("BATCH_MM_SUBJ_END", 5)
-
-# --- Sesiones, tareas y metodos (parametrizable via JSON en env) ---
-SESSIONS: list[str] = _env_json_list("BATCH_MM_SESSIONS", DEFAULT_SESSIONS)
-TASKS: list[str] = _env_json_list("BATCH_MM_TASKS", DEFAULT_TASKS)
-METHODS: list[str] = _env_json_list("BATCH_MM_METHODS", DEFAULT_METHODS)
-
-# --- Ventana temporal ---
-T_START: float = _env_float("BATCH_MM_T_START", 0.0)
-T_END: float = _env_float("BATCH_MM_T_END", 300.0)
-
-# --- Parametros del pipeline ---
-LATENT_DIM: int = _env_int("BATCH_MM_LATENT_DIM", 2)
-ICA_METHOD: str = _env("BATCH_MM_ICA_METHOD", "picard")
-L_FREQ: float = _env_float("BATCH_MM_L_FREQ", 1.0)
-H_FREQ: float = _env_float("BATCH_MM_H_FREQ", 40.0)
-
-# --- Rutas ---
-PARAMS_FILE: Path | None = None
-if _env("BATCH_MM_PARAMS_FILE"):
-    PARAMS_FILE = Path(_env("BATCH_MM_PARAMS_FILE"))
-DB_PATH: Path = Path(_env("BATCH_MM_DB_PATH", DB_TEST_RETEST_GEDAI_PATH))
-OUTPUT_DIR: Path = Path(_env("BATCH_MM_OUTPUT_DIR", BASE_RESULTS_PATH))
-CACHE_DIR: Path = Path(_env("BATCH_MM_CACHE_DIR", BASE_CACHE_PATH))
-
-# --- Ejecucion ---
-DELAY: float = _env_float("BATCH_MM_DELAY", 2.0)
-IGNORE_CACHE: bool = _env_bool("BATCH_MM_IGNORE_CACHE", False)
-RUN_POSTPROCESS: bool = _env_bool("BATCH_MM_RUN_POSTPROCESS", True)
-MAX_WORKERS: int = _env_int("BATCH_MM_MAX_WORKERS", DEFAULT_BATCH_RUNS_WORKERS)
-
-# --- Logging ---
-if os.environ.get("BATCH_MM_LOG_LEVEL", LOGGING_LEVEL).upper() == "DEBUG":
-    logger.setLevel(logging.DEBUG)
-
-# --- Pipeline module ---
-PIPELINE_MODULE: str = "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai"
-_PIPELINE_OUT_SUBPATH = "test_retest_gedai"
-
-# --- Archivos de imagen para el post-procesamiento ---
-POTENTIAL_IMG = "potential_2d.png"
-NONCONS_IMG = "potential_2d_nonconservative_force.png"
-COMPOSITE_PREFIX = "methods_comparison"
-
-# --- Checkpoint ---
-CHECKPOINT_FILE: Path = CACHE_DIR / "batch_checkpoint_multi_method.json"
+def _spec_hash(method: dict, shared: dict) -> str:
+    """Genera el hash corto igual que el orquestador."""
+    spec = {
+        "stage1_embedding": method.get("stage1_embedding"),
+        "stage1_params": method.get("stage1_params", {}),
+        "stage2_dynamics": method["stage2_dynamics"],
+        "stage2_params": method.get("stage2_params", {}),
+        "stage3_selection": method["stage3_selection"],
+        "stage3_params": method.get("stage3_params", {}),
+    }
+    payload = json.dumps(spec, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
 
 
 # ===========================================================================
@@ -240,73 +209,38 @@ CHECKPOINT_FILE: Path = CACHE_DIR / "batch_checkpoint_multi_method.json"
 # ===========================================================================
 
 
-def _generate_jobs_from_params() -> list[dict]:
-    """Genera la lista de jobs a partir de los parametros escalables.
+def _generate_jobs(params: dict) -> list[dict]:
+    """Genera la lista de jobs a partir del JSON de parametros.
 
-    Cada job es un dict con:
-        subject, session, task, method, t_start, t_end
+    Cada job contiene toda la informacion necesaria para construir
+    la llamada al orquestador: sujetos, sesion, tarea, metodo, y
+    los parametros de pipeline completos.
     """
+    subj_cfg = params["subjects"]
+    start = subj_cfg["start"]
+    end = subj_cfg["end"]
+    sessions = params["sessions"]
+    tasks = params["tasks"]
+    methods = params["methods"]
+    tw = params["time_window"]
+    shared = params["shared_params"]
+
     jobs: list[dict] = []
-    for subj_idx in range(SUBJ_START, SUBJ_END + 1):
+    for subj_idx in range(start, end + 1):
         subject = f"sub-{subj_idx:02d}"
-        for session in SESSIONS:
-            for task in TASKS:
-                for method in METHODS:
+        for session in sessions:
+            for task in tasks:
+                for method in methods:
                     jobs.append({
                         "subject": subject,
                         "session": session,
                         "task": task,
+                        "method_label": method["label"],
                         "method": method,
-                        "t_start": str(T_START),
-                        "t_end": str(T_END),
+                        "shared": shared,
+                        "t_start": str(tw["t_start"]),
+                        "t_end": str(tw["t_end"]),
                     })
-    return jobs
-
-
-def _generate_jobs_from_file(filepath: Path) -> list[dict]:
-    """Lee jobs desde un archivo de parametros y los combina con cada metodo.
-
-    El archivo tiene el formato original:
-        ['sub-01', 'session1_eyesclosed', '0.00', '300.00', 'eyesclosed']
-    """
-    rows: list[list[str]] = []
-    ext = filepath.suffix.lower()
-    if ext == ".csv":
-        with open(filepath, "r", encoding="utf-8", newline="") as fh:
-            reader = csv.reader(fh)
-            next(reader, None)  # header
-            for row in reader:
-                if len(row) >= 5:
-                    rows.append(row[:5])
-    else:
-        with open(filepath, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                try:
-                    row = ast.literal_eval(line)
-                    if isinstance(row, list) and len(row) >= 5:
-                        rows.append(row[:5])
-                except (SyntaxError, ValueError):
-                    continue
-
-    jobs: list[dict] = []
-    for row in rows:
-        subject, session_task, t_start, t_end, label = row[:5]
-        if "_" in session_task:
-            session, task = session_task.rsplit("_", 1)
-        else:
-            session, task = session_task, label
-        for method in METHODS:
-            jobs.append({
-                "subject": subject,
-                "session": session,
-                "task": task,
-                "method": method,
-                "t_start": t_start,
-                "t_end": t_end,
-            })
     return jobs
 
 
@@ -316,38 +250,56 @@ def _generate_jobs_from_file(filepath: Path) -> list[dict]:
 
 
 class MultiMethodBatchRunner:
-    """Orquesta la ejecucion multi-metodo del pipeline IgA."""
+    """Orquesta la ejecucion multi-metodo del pipeline IgA (nueva API 3 etapas)."""
 
     CSV_FIELDS = [
-        "timestamp", "subject", "session", "task", "method",
-        "t_start", "t_end", "success", "returncode", "elapsed_s", "command",
+        "timestamp", "subject", "session", "task", "method_label",
+        "spec_label", "t_start", "t_end", "success", "returncode",
+        "elapsed_s", "command",
     ]
 
-    def __init__(self) -> None:
-        # --- Validaciones ---
-        if PARAMS_FILE is not None and not PARAMS_FILE.exists():
-            logger.error("Archivo de parametros no encontrado: %s", PARAMS_FILE)
-            sys.exit(1)
-        if not _PROJECT_ROOT.exists():
-            logger.error("Raiz del proyecto no encontrada: %s", _PROJECT_ROOT)
-            sys.exit(1)
-        if not DB_PATH.exists():
-            logger.warning("Ruta de test-retest Gedai no encontrada: %s", DB_PATH)
+    def __init__(self, params: dict) -> None:
+        self.params = params
+        self.pipeline_module = params.get(
+            "pipeline_module",
+            "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai",
+        )
+        self.shared = params["shared_params"]
+        self.exec_cfg = params.get("execution", {})
+        self.post_cfg = params.get("postprocess", {})
 
+        # Rutas
+        self.db_path = Path(DB_TEST_RETEST_GEDAI_PATH)
+        self.output_dir = Path(BASE_RESULTS_PATH)
+        self.cache_dir = Path(BASE_CACHE_PATH)
+
+        # Ejecucion
+        self.delay: float = self.exec_cfg.get("delay", 2.0)
+        self.max_workers: int = self.exec_cfg.get("max_workers", DEFAULT_BATCH_RUNS_WORKERS)
+        self.run_postprocess: bool = self.exec_cfg.get("run_postprocess", True)
+        self.ignore_cache: bool = self.shared.get("ignore_cache", False)
+
+        # Logging level override
+        log_level = self.exec_cfg.get("log_level", LOGGING_LEVEL)
+        if log_level.upper() == "DEBUG":
+            logger.setLevel(logging.DEBUG)
+
+        # Imagenes para post-procesamiento
+        self.potential_img = self.post_cfg.get("potential_img", "potential_2d.png")
+        self.noncons_img = self.post_cfg.get(
+            "nonconservative_img", "potential_2d_nonconservative_force.png"
+        )
+        self.composite_prefix = self.post_cfg.get("composite_prefix", "methods_comparison")
+
+        # Checkpoint
         self.checkpoint: set[str] = self._load_checkpoint()
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = logging_path / f"batch_log_multi_method_{ts}.csv"
         self._init_csv_log()
 
-        # --- Generar jobs ---
-        if PARAMS_FILE is not None:
-            logger.info("Generando jobs desde archivo: %s", PARAMS_FILE)
-            self.all_jobs = _generate_jobs_from_file(PARAMS_FILE)
-        else:
-            logger.info("Generando jobs desde parametros escalables")
-            self.all_jobs = _generate_jobs_from_params()
-
+        # Generar jobs
+        self.all_jobs = _generate_jobs(params)
         self._print_banner()
 
     # ------------------------------------------------------------------
@@ -358,41 +310,51 @@ class MultiMethodBatchRunner:
         n_subjects = len({j["subject"] for j in self.all_jobs})
         n_sessions = len({j["session"] for j in self.all_jobs})
         n_tasks = len({j["task"] for j in self.all_jobs})
-        n_methods = len({j["method"] for j in self.all_jobs})
+        n_methods = len({j["method_label"] for j in self.all_jobs})
 
         logger.info("=" * 70)
         logger.info("  BATCH MULTI-METHOD -- Test-Retest Gedai (EEGLAB .set/.fdt)")
+        logger.info("  [NUEVA API 3 ETAPAS]")
         logger.info("=" * 70)
-        logger.info("  Pipeline    : %s", PIPELINE_MODULE)
-        logger.info("  DB path     : %s", DB_PATH)
-        logger.info("  Output dir  : %s", OUTPUT_DIR)
-        logger.info("  Cache dir   : %s", CACHE_DIR)
-        logger.info("  Checkpoint  : %s", CHECKPOINT_FILE)
+        logger.info("  Pipeline    : %s", self.pipeline_module)
+        logger.info("  DB path     : %s", self.db_path)
+        logger.info("  Output dir  : %s", self.output_dir)
+        logger.info("  Cache dir   : %s", self.cache_dir)
+        logger.info("  Checkpoint  : %s", self._checkpoint_path())
         logger.info("  ---")
+        subj_cfg = self.params["subjects"]
         logger.info("  Subjects    : %d (sub-%02d .. sub-%02d)",
-                    n_subjects, SUBJ_START, SUBJ_END)
-        logger.info("  Sessions    : %s", SESSIONS)
-        logger.info("  Tasks       : %s", TASKS)
-        logger.info("  Methods     : %s", METHODS)
-        logger.info("  Time window : %.1f s -> %.1f s", T_START, T_END)
+                    n_subjects, subj_cfg["start"], subj_cfg["end"])
+        logger.info("  Sessions    : %s", self.params["sessions"])
+        logger.info("  Tasks       : %s", self.params["tasks"])
+        logger.info("  Methods     : %s",
+                    [m["label"] for m in self.params["methods"]])
+        tw = self.params["time_window"]
+        logger.info("  Time window : %.1f s -> %.1f s", tw["t_start"], tw["t_end"])
+        logger.info("  Latent dim  : %d", self.shared.get("latent_dim", 2))
         logger.info("  ---")
         logger.info("  Total jobs  : %d (%d subj x %d sess x %d task x %d meth)",
                     len(self.all_jobs), n_subjects, n_sessions, n_tasks, n_methods)
-        logger.info("  Delay       : %.1f s", DELAY)
-        logger.info("  Ignore cache: %s", IGNORE_CACHE)
+        logger.info("  Delay       : %.1f s", self.delay)
+        logger.info("  Ignore cache: %s", self.ignore_cache)
         logger.info("  Max workers : %d (%s)",
-                    MAX_WORKERS, "paralelo" if MAX_WORKERS > 1 else "secuencial")
-        logger.info("  Post-process: %s", RUN_POSTPROCESS)
+                    self.max_workers, "paralelo" if self.max_workers > 1 else "secuencial")
+        logger.info("  Post-process: %s", self.run_postprocess)
         logger.info("=" * 70)
 
     # ------------------------------------------------------------------
     # Checkpoint
     # ------------------------------------------------------------------
 
+    def _checkpoint_path(self) -> Path:
+        return self.cache_dir / "batch_checkpoint_multi_method.json"
+
     def _load_checkpoint(self) -> set[str]:
-        if CHECKPOINT_FILE.exists():
+        cp = self._checkpoint_path() if hasattr(self, "cache_dir") else \
+            Path(BASE_CACHE_PATH) / "batch_checkpoint_multi_method.json"
+        if cp.exists():
             try:
-                with open(CHECKPOINT_FILE, "r", encoding="utf-8") as fh:
+                with open(cp, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 ck = set(data.get("completed", []))
                 logger.info("Checkpoint cargado: %d jobs previos completados", len(ck))
@@ -402,24 +364,25 @@ class MultiMethodBatchRunner:
         return set()
 
     def _save_checkpoint(self) -> None:
+        cp = self._checkpoint_path()
         try:
-            CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(CHECKPOINT_FILE, "w", encoding="utf-8") as fh:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            with open(cp, "w", encoding="utf-8") as fh:
                 json.dump({"completed": sorted(self.checkpoint)}, fh, indent=2)
         except OSError as exc:
             logger.warning("No se pudo guardar checkpoint: %s", exc)
 
     @staticmethod
     def _checkpoint_key(subject: str, session: str, task: str,
-                        method: str, t_start: str, t_end: str) -> str:
-        return f"{subject}|{session}|{task}|{method}|{t_start}|{t_end}"
+                        method_label: str, t_start: str, t_end: str) -> str:
+        return f"{subject}|{session}|{task}|{method_label}|{t_start}|{t_end}"
 
     # ------------------------------------------------------------------
     # Logs CSV
     # ------------------------------------------------------------------
 
     def _init_csv_log(self) -> None:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         try:
             with open(self.log_file, "w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=self.CSV_FIELDS)
@@ -437,7 +400,8 @@ class MultiMethodBatchRunner:
                     "subject": job["subject"],
                     "session": job["session"],
                     "task": job["task"],
-                    "method": job["method"],
+                    "method_label": job["method_label"],
+                    "spec_label": _spec_label(job["method"]),
                     "t_start": job["t_start"],
                     "t_end": job["t_end"],
                     "success": success,
@@ -457,26 +421,15 @@ class MultiMethodBatchRunner:
         for job in jobs:
             key = self._checkpoint_key(
                 job["subject"], job["session"], job["task"],
-                job["method"], job["t_start"], job["t_end"],
+                job["method_label"], job["t_start"], job["t_end"],
             )
-
             if key in self.checkpoint:
                 logger.debug(
                     "SKIP (checkpoint): %s/%s/%s [%s]",
-                    job["subject"], job["session"], job["task"], job["method"],
+                    job["subject"], job["session"], job["task"],
+                    job["method_label"],
                 )
                 continue
-
-            # # Verificar si el directorio de salida ya tiene resultados
-            # out_sub = self._get_output_dir(job)
-            # if out_sub.exists() and any(out_sub.glob("*.png")):
-            #     logger.debug(
-            #         "SKIP (output exists): %s/%s/%s [%s]",
-            #         job["subject"], job["session"], job["task"], job["method"],
-            #     )
-            #     self.checkpoint.add(key)
-            #     continue
-
             todo.append(job)
 
         if skipped := len(jobs) - len(todo):
@@ -484,47 +437,119 @@ class MultiMethodBatchRunner:
         return todo
 
     # ------------------------------------------------------------------
-    # Ruta de salida para un job
+    # Ruta de salida para un job (misma logica que el orquestador nuevo)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _get_output_dir(job: dict) -> Path:
-        """Devuelve el directorio de salida donde el pipeline guarda sus resultados.
+    def _get_output_dir(self, job: dict) -> Path:
+        """Devuelve el directorio de salida donde el orquestador guarda resultados.
 
-        Mismo patron que ``test_iga_from_eeg_latent_test_retest_gedai.py``:
-        ``test_retest_gedai/{subject}/{session}/{latent_dim}_latent_dim_{method}/from{t_start}s_to_{t_end}s_{task}``
+        Patron del orquestador nuevo:
+        ``test_retest_gedai/{subject}/{session}/
+         {latent_dim}_latent_dim_{spec_label}_{spec_hash}/
+         from{t_start}s_to_{t_end}s_{task}``
         """
         method = job["method"]
+        shared = job["shared"]
+        latent_dim = shared.get("latent_dim", 2)
+        spec_label = _spec_label(method)
+        spec_hash = _spec_hash(method, shared)
+
         return (
-            OUTPUT_DIR
-            / _PIPELINE_OUT_SUBPATH
+            self.output_dir
+            / "test_retest_gedai"
             / job["subject"]
             / job["session"]
-            / f"{LATENT_DIM}_latent_dim_{method}"
+            / f"{latent_dim}_latent_dim_{spec_label}_{spec_hash}"
             / f"from{job['t_start']}s_to_{job['t_end']}s_{job['task']}"
         )
 
     # ------------------------------------------------------------------
-    # Construccion del comando
+    # Construccion del comando (nueva API 3 etapas)
     # ------------------------------------------------------------------
 
     def _build_command(self, job: dict) -> list[str]:
+        """Construye el comando para llamar al orquestador con la nueva API.
+
+        Usa ``--stage1-embedding``, ``--stage2-dynamics``, ``--stage3-selection``
+        y ``--stageX-params`` en lugar del legacy ``--scoring-method``.
+        """
+        method = job["method"]
+        shared = job["shared"]
+
         cmd = [
             sys.executable,
-            "-m", PIPELINE_MODULE,
+            "-m", self.pipeline_module,
             "--subject", job["subject"],
             "--session", job["session"],
             "--task", job["task"],
             "--t-start", job["t_start"],
             "--t-end", job["t_end"],
-            "--latent-dim", str(LATENT_DIM),
-            "--scoring-method", job["method"],
-            "--l-freq", str(L_FREQ),
-            "--h-freq", str(H_FREQ),
-            "--ica-method", ICA_METHOD,
+            "--latent-dim", str(shared.get("latent_dim", 2)),
+            "--l-freq", str(shared.get("l_freq", 1.0)),
+            "--h-freq", str(shared.get("h_freq", 40.0)),
+            "--ica-method", shared.get("ica_method", "picard"),
         ]
-        if IGNORE_CACHE:
+
+        # --- Stage 1: Embedding ---
+        s1 = method.get("stage1_embedding")
+        if s1:
+            cmd.extend(["--stage1-embedding", s1])
+            s1_params = method.get("stage1_params", {})
+            if s1_params:
+                cmd.extend(["--stage1-params", json.dumps(s1_params)])
+        else:
+            cmd.extend(["--stage1-embedding", "none"])
+
+        # --- Stage 2: Dynamics ---
+        cmd.extend(["--stage2-dynamics", method["stage2_dynamics"]])
+        s2_params = method.get("stage2_params", {})
+        if s2_params:
+            cmd.extend(["--stage2-params", json.dumps(s2_params)])
+
+        # --- Stage 3: Selection ---
+        cmd.extend(["--stage3-selection", method["stage3_selection"]])
+        s3_params = method.get("stage3_params", {})
+        if s3_params:
+            cmd.extend(["--stage3-params", json.dumps(s3_params)])
+
+        # --- Shared params opcionales ---
+        if shared.get("analysis_dim") is not None:
+            cmd.extend(["--analysis-dim", str(shared["analysis_dim"])])
+
+        if shared.get("column") is not None:
+            cmd.extend(["--column", str(shared["column"])])
+
+        if shared.get("workers") is not None:
+            cmd.extend(["--workers", str(shared["workers"])])
+
+        if shared.get("hankel_embedding_depth") is not None:
+            cmd.extend([
+                "--hankel-embedding-depth",
+                str(shared["hankel_embedding_depth"]),
+            ])
+
+        # Diffusion maps params (solo se pasan si no estan ya en stage2_params)
+        if method["stage2_dynamics"] != "diffusion_maps":
+            for dflag, dkey in [
+                ("--diffusion-sigma", "diffusion_sigma"),
+                ("--diffusion-k", "diffusion_k"),
+                ("--diffusion-time", "diffusion_time"),
+                ("--diffusion-alpha", "diffusion_alpha"),
+            ]:
+                val = shared.get(dkey)
+                if val is not None:
+                    cmd.extend([dflag, str(val)])
+
+        # --- Flags booleanos ---
+        if shared.get("ignore_cache", False) or self.ignore_cache:
             cmd.append("--ignore-cache")
+
+        if not shared.get("verbose", True):
+            cmd.append("--no-verbose")
+
+        if shared.get("no_save_potential", False):
+            cmd.append("--no-save-potential")
+
         return cmd
 
     # ------------------------------------------------------------------
@@ -534,22 +559,24 @@ class MultiMethodBatchRunner:
     def _run_single_job(self, job: dict) -> tuple[str, bool]:
         key = self._checkpoint_key(
             job["subject"], job["session"], job["task"],
-            job["method"], job["t_start"], job["t_end"],
+            job["method_label"], job["t_start"], job["t_end"],
         )
 
         try:
             cmd = self._build_command(job)
-        except FileNotFoundError as exc:
+        except Exception as exc:
             logger.error(
-                "No se encontro .set para %s/%s/%s [%s]: %s",
-                job["subject"], job["session"], job["task"], job["method"], exc,
+                "Error construyendo comando para %s/%s/%s [%s]: %s",
+                job["subject"], job["session"], job["task"],
+                job["method_label"], exc,
             )
             return key, False
 
         logger.info(
-            "RUN | %s/%s/%s | method=%s | [%s-%s] s",
+            "RUN | %s/%s/%s | method=%s (%s) | [%s-%s] s",
             job["subject"], job["session"], job["task"],
-            job["method"], job["t_start"], job["t_end"],
+            job["method_label"], _spec_label(job["method"]),
+            job["t_start"], job["t_end"],
         )
         logger.debug("CMD: %s", " ".join(cmd))
 
@@ -577,13 +604,13 @@ class MultiMethodBatchRunner:
                 logger.info(
                     "OK | %s/%s/%s [%s] (%.1f s)",
                     job["subject"], job["session"], job["task"],
-                    job["method"], elapsed,
+                    job["method_label"], elapsed,
                 )
             else:
                 logger.error(
                     "ERROR | %s/%s/%s [%s] -- codigo %d",
                     job["subject"], job["session"], job["task"],
-                    job["method"], proc.returncode,
+                    job["method_label"], proc.returncode,
                 )
 
             return key, success
@@ -593,23 +620,100 @@ class MultiMethodBatchRunner:
             logger.error(
                 "EXCEPTION | %s/%s/%s [%s]: %s",
                 job["subject"], job["session"], job["task"],
-                job["method"], exc,
+                job["method_label"], exc,
             )
-            self._write_csv_log(job, False, -1, elapsed, cmd)
+            self._write_csv_log(job, False, -1, elapsed, cmd if 'cmd' in dir() else [])
             return key, False
 
     # ------------------------------------------------------------------
-    # Post-procesamiento: graficos compuestos 2xN
+    # Post-procesamiento: graficos compuestos en matriz
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _embedding_key(method: dict) -> str:
+        """Clave normalizada del stage1 embedding para agrupar filas."""
+        s1 = method.get("stage1_embedding")
+        return s1 if s1 and s1 != "none" else "none"
+
+    @staticmethod
+    def _embedding_display_name(key: str) -> str:
+        """Nombre legible para el grupo de embedding (labels de fila)."""
+        return key if key != "none" else "No embedding"
+
+    def _organize_method_matrix(self, jobs: list[dict]) -> dict:
+        """Organiza los jobs de un grupo (subject, session, task) en una
+        estructura matricial: columnas = combos stage2+stage3,
+        filas = grupos de stage1 embedding.
+
+        Returns
+        -------
+        dict with keys:
+            - ``columns``: lista de (stage2, stage3) ordenadas
+            - ``row_groups``: lista de embedding keys ordenadas
+              (con embedding primero, luego sin embedding)
+            - ``cell``: dict  ``(emb_key, s2, s3) -> job``
+            - ``col_labels``: lista de strings para titulos de columna
+        """
+        # Descubrir columnas: combinaciones unicas (stage2, stage3)
+        col_set: list[tuple[str, str]] = []
+        seen_cols: set[tuple[str, str]] = set()
+        for job in jobs:
+            m = job["method"]
+            pair = (m["stage2_dynamics"], m["stage3_selection"])
+            if pair not in seen_cols:
+                seen_cols.add(pair)
+                col_set.append(pair)
+
+        # Descubrir row groups: embedding keys unicos
+        emb_set: list[str] = []
+        seen_emb: set[str] = set()
+        for job in jobs:
+            ek = self._embedding_key(job["method"])
+            if ek not in seen_emb:
+                seen_emb.add(ek)
+                emb_set.append(ek)
+
+        # Ordenar: embeddings con nombre primero (hankel, ...), luego "none"
+        emb_ordered = sorted(
+            [e for e in emb_set if e != "none"],
+            key=lambda x: x.lower(),
+        ) + [e for e in emb_set if e == "none"]
+
+        # Build lookup: (emb_key, s2, s3) -> job
+        cell: dict[tuple[str, str, str], dict] = {}
+        for job in jobs:
+            m = job["method"]
+            ek = self._embedding_key(m)
+            pair = (m["stage2_dynamics"], m["stage3_selection"])
+            cell[(ek, pair[0], pair[1])] = job
+
+        # Column labels
+        col_labels = [f"{s2} + {s3}" for s2, s3 in col_set]
+
+        return {
+            "columns": col_set,
+            "row_groups": emb_ordered,
+            "cell": cell,
+            "col_labels": col_labels,
+        }
+
     def _run_postprocessing(self) -> None:
-        """Genera graficos compuestos por (sujeto, sesion, tarea).
+        """Genera graficos compuestos en matriz por (sujeto, sesion, tarea).
 
-        Layout: 2 filas x N columnas (N = numero de metodos)
-          - Fila 0: potencial 2D (potential_2d.png)
-          - Fila 1: fuerza no-conservativa / rotacional (potential_2d_nonconservative_force.png)
+        Layout adaptable:
+          - **Columnas** = combinaciones unicas de (stage2_dynamics, stage3_selection).
+          - **Filas** = grupos de stage1_embedding, cada uno con 2 sub-filas:
+            sub-fila par = potencial 2D, sub-fila impar = fuerza no-conservativa.
+          - Total de filas = len(row_groups) * 2.
+          - Total de columnas = len(stage23_combos).
 
-        El nombre del archivo incluye sujeto, sesion y tarea para unicidad:
+        Ejemplo con hankel/none y 4 combos stage2/3:
+          Fila 0: [hankel] potential       para cada combo de columna
+          Fila 1: [hankel] rotational     para cada combo de columna
+          Fila 2: [none]  potential       para cada combo de columna
+          Fila 3: [none]  rotational     para cada combo de columna
+
+        El nombre del archivo incluye sujeto, sesion y tarea:
           methods_comparison_{subject}_{session}_{task}.png
         """
         import matplotlib
@@ -619,7 +723,7 @@ class MultiMethodBatchRunner:
 
         logger.info("")
         logger.info("=" * 70)
-        logger.info("  INICIANDO POST-PROCESAMIENTO: GRAFICOS COMPUESTOS")
+        logger.info("  INICIANDO POST-PROCESAMIENTO: GRAFICOS COMPUESTOS (MATRIZ)")
         logger.info("=" * 70)
 
         # Agrupar jobs por (subject, session, task)
@@ -639,81 +743,137 @@ class MultiMethodBatchRunner:
                 group_idx, total_groups, subject, session, task,
             )
 
-            n_methods = len(jobs)
+            # Organizar en matriz
+            matrix = self._organize_method_matrix(jobs)
+            n_cols = len(matrix["columns"])
+            n_row_groups = len(matrix["row_groups"])
+            n_rows = n_row_groups * 2
+
+            logger.info(
+                "  Layout: %d filas x %d columnas (%d embedding groups x 2)",
+                n_rows, n_cols, n_row_groups,
+            )
+
             fig, axes = plt.subplots(
-                2, n_methods,
-                figsize=(5 * n_methods, 8),
+                n_rows, n_cols,
+                figsize=(5 * n_cols, 4 * n_rows),
                 constrained_layout=True,
             )
 
-            # Si solo hay 1 metodo, asegurarse de que axes sea 2D
-            if n_methods == 1:
-                axes = axes.reshape(2, 1)
+            # Asegurar que axes sea siempre 2D
+            if n_rows == 1 and n_cols == 1:
+                axes = axes.reshape(1, 1)
+            elif n_rows == 1:
+                axes = axes.reshape(1, -1)
+            elif n_cols == 1:
+                axes = axes.reshape(-1, 1)
 
-            row_labels = ["Potential (U)", "Non-conservative force (v)"]
             n_found = 0
+            expected_images = 2 * n_cols * n_row_groups
 
-            for col_idx, job in enumerate(jobs):
-                method = job["method"]
-                out_dir = self._get_output_dir(job)
+            for rg_idx, emb_key in enumerate(matrix["row_groups"]):
+                # Sub-filas para este grupo de embedding
+                row_pot = rg_idx * 2      # fila de potencial
+                row_rot = rg_idx * 2 + 1  # fila de rotacional
 
-                # --- Fila 0: Potencial 2D ---
-                pot_path = out_dir / POTENTIAL_IMG
-                if pot_path.exists():
-                    try:
-                        img = Image.open(pot_path)
-                        axes[0, col_idx].imshow(img)
-                        axes[0, col_idx].set_title(f"{method}", fontsize=11, fontweight="bold")
-                        axes[0, col_idx].axis("off")
-                        n_found += 1
-                    except Exception as exc:
-                        logger.warning("  No se pudo cargar %s: %s", pot_path, exc)
-                        axes[0, col_idx].text(
-                            0.5, 0.5, f"ERROR\n{pot_path.name}",
-                            ha="center", va="center", fontsize=9, color="red",
-                            transform=axes[0, col_idx].transAxes,
+                for col_idx, (s2, s3) in enumerate(matrix["columns"]):
+                    lookup = (emb_key, s2, s3)
+                    job = matrix["cell"].get(lookup)
+                    col_title = matrix["col_labels"][col_idx]
+
+                    if job is None:
+                        # Celda vacia: no hay job para esta combinacion
+                        for r in (row_pot, row_rot):
+                            axes[r, col_idx].text(
+                                0.5, 0.5, "N/A",
+                                ha="center", va="center", fontsize=10,
+                                color="lightgray",
+                                transform=axes[r, col_idx].transAxes,
+                            )
+                            axes[r, col_idx].axis("off")
+                        continue
+
+                    out_dir = self._get_output_dir(job)
+
+                    # --- Sub-fila de potencial ---
+                    pot_path = out_dir / self.potential_img
+                    if pot_path.exists():
+                        try:
+                            img = Image.open(pot_path)
+                            axes[row_pot, col_idx].imshow(img)
+                            n_found += 1
+                        except Exception as exc:
+                            logger.warning("  No se pudo cargar %s: %s", pot_path, exc)
+                            axes[row_pot, col_idx].text(
+                                0.5, 0.5, f"ERROR\n{pot_path.name}",
+                                ha="center", va="center", fontsize=8, color="red",
+                                transform=axes[row_pot, col_idx].transAxes,
+                            )
+                    else:
+                        logger.warning("  Falta: %s", pot_path)
+                        axes[row_pot, col_idx].text(
+                            0.5, 0.5, f"MISSING\n{pot_path.name}",
+                            ha="center", va="center", fontsize=8, color="gray",
+                            transform=axes[row_pot, col_idx].transAxes,
                         )
-                        axes[0, col_idx].set_title(f"{method}", fontsize=11)
-                        axes[0, col_idx].axis("off")
-                else:
-                    logger.warning("  Falta: %s", pot_path)
-                    axes[0, col_idx].text(
-                        0.5, 0.5, f"MISSING\n{pot_path.name}",
-                        ha="center", va="center", fontsize=9, color="gray",
-                        transform=axes[0, col_idx].transAxes,
-                    )
-                    axes[0, col_idx].set_title(f"{method}", fontsize=11)
-                    axes[0, col_idx].axis("off")
+                    axes[row_pot, col_idx].axis("off")
 
-                # --- Fila 1: Fuerza no-conservativa ---
-                ncf_path = out_dir / NONCONS_IMG
-                if ncf_path.exists():
-                    try:
-                        img = Image.open(ncf_path)
-                        axes[1, col_idx].imshow(img)
-                        axes[1, col_idx].axis("off")
-                        n_found += 1
-                    except Exception as exc:
-                        logger.warning("  No se pudo cargar %s: %s", ncf_path, exc)
-                        axes[1, col_idx].text(
-                            0.5, 0.5, f"ERROR\n{ncf_path.name}",
-                            ha="center", va="center", fontsize=9, color="red",
-                            transform=axes[1, col_idx].transAxes,
+                    # --- Sub-fila de fuerza no-conservativa ---
+                    ncf_path = out_dir / self.noncons_img
+                    if ncf_path.exists():
+                        try:
+                            img = Image.open(ncf_path)
+                            axes[row_rot, col_idx].imshow(img)
+                            n_found += 1
+                        except Exception as exc:
+                            logger.warning("  No se pudo cargar %s: %s", ncf_path, exc)
+                            axes[row_rot, col_idx].text(
+                                0.5, 0.5, f"ERROR\n{ncf_path.name}",
+                                ha="center", va="center", fontsize=8, color="red",
+                                transform=axes[row_rot, col_idx].transAxes,
+                            )
+                    else:
+                        logger.warning("  Falta: %s", ncf_path)
+                        axes[row_rot, col_idx].text(
+                            0.5, 0.5, f"MISSING\n{ncf_path.name}",
+                            ha="center", va="center", fontsize=8, color="gray",
+                            transform=axes[row_rot, col_idx].transAxes,
                         )
-                        axes[1, col_idx].axis("off")
-                else:
-                    logger.warning("  Falta: %s", ncf_path)
-                    axes[1, col_idx].text(
-                        0.5, 0.5, f"MISSING\n{ncf_path.name}",
-                        ha="center", va="center", fontsize=9, color="gray",
-                        transform=axes[1, col_idx].transAxes,
-                    )
-                    axes[1, col_idx].axis("off")
+                    axes[row_rot, col_idx].axis("off")
 
-            # --- Etiquetas de fila ---
-            for row_idx, label in enumerate(row_labels):
-                axes[row_idx, 0].set_ylabel(label, fontsize=12, fontweight="bold",
-                                             rotation=90, labelpad=15)
+                # --- Titulos de columna (solo en la primera sub-fila del grupo) ---
+                for col_idx, col_title in enumerate(matrix["col_labels"]):
+                    axes[row_pot, col_idx].set_title(
+                        col_title, fontsize=10, fontweight="bold", pad=8,
+                    )
+
+            # --- Etiquetas de fila (grupo de embedding + tipo de imagen) ---
+            for rg_idx, emb_key in enumerate(matrix["row_groups"]):
+                emb_name = self._embedding_display_name(emb_key)
+                row_pot = rg_idx * 2
+                row_rot = rg_idx * 2 + 1
+
+                # Etiqueta del grupo de embedding centrada entre las 2 sub-filas
+                # Se pone en la sub-fila de potencial como ylabel
+                axes[row_pot, 0].set_ylabel(
+                    f"{emb_name}\n\nPotential (U)",
+                    fontsize=11, fontweight="bold", rotation=90, labelpad=15,
+                )
+                axes[row_rot, 0].set_ylabel(
+                    "Non-cons.\nforce (v)",
+                    fontsize=11, fontweight="bold", rotation=90, labelpad=15,
+                )
+
+            # --- Lineas separadoras horizontales entre grupos de embedding ---
+            if n_row_groups > 1:
+                for rg_idx in range(1, n_row_groups):
+                    sep_row = rg_idx * 2 - 0.5
+                    fig.add_artist(plt.matplotlib.lines.Line2D(
+                        [0.02, 0.98], [sep_row / n_rows, sep_row / n_rows],
+                        transform=fig.transFigure,
+                        color="black", linewidth=1.5, linestyle="--",
+                        alpha=0.5,
+                    ))
 
             # --- Titulo general ---
             fig.suptitle(
@@ -723,13 +883,15 @@ class MultiMethodBatchRunner:
 
             # --- Guardar con nombre dinamico ---
             save_dir = self._get_output_dir(jobs[0]).parent
-            composite_name = f"{COMPOSITE_PREFIX}_{subject}_{session}_{task}.png"
+            composite_name = f"{self.composite_prefix}_{subject}_{session}_{task}.png"
             save_path = save_dir / composite_name
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
-                fig.savefig(str(save_path), dpi=150, bbox_inches="tight",
-                            facecolor="white", edgecolor="none")
+                fig.savefig(
+                    str(save_path), dpi=150, bbox_inches="tight",
+                    facecolor="white", edgecolor="none",
+                )
                 plt.close(fig)
                 logger.info("  Guardado: %s", save_path)
                 generated += 1
@@ -738,7 +900,6 @@ class MultiMethodBatchRunner:
                 plt.close(fig)
 
             # Conteo parcial
-            expected_images = 2 * n_methods
             if n_found == 0:
                 missing += 1
             elif n_found < expected_images:
@@ -761,11 +922,11 @@ class MultiMethodBatchRunner:
     # ------------------------------------------------------------------
 
     def run(self) -> int:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.all_jobs:
-            logger.error("No se generaron jobs. Revisa la configuracion.")
+            logger.error("No se generaron jobs. Revisa el JSON de parametros.")
             return 1
 
         todo = self._filter_todo(self.all_jobs)
@@ -773,7 +934,7 @@ class MultiMethodBatchRunner:
 
         if total == 0:
             logger.info("Todos los jobs ya estan completados.")
-            if RUN_POSTPROCESS:
+            if self.run_postprocess:
                 self._run_postprocessing()
             return 0
 
@@ -782,7 +943,7 @@ class MultiMethodBatchRunner:
         completed = 0
         failed = 0
 
-        if MAX_WORKERS > 1:
+        if self.max_workers > 1:
             completed, failed = self._run_parallel(todo, total)
         else:
             completed, failed = self._run_sequential(todo, total)
@@ -796,7 +957,7 @@ class MultiMethodBatchRunner:
         )
         logger.info("Log CSV: %s", self.log_file)
 
-        if RUN_POSTPROCESS:
+        if self.run_postprocess:
             self._run_postprocessing()
 
         return 0 if failed == 0 else 1
@@ -820,9 +981,9 @@ class MultiMethodBatchRunner:
 
             self._save_checkpoint()
 
-            if idx < total and DELAY > 0:
-                logger.debug("Pausa %.1f s...", DELAY)
-                time.sleep(DELAY)
+            if idx < total and self.delay > 0:
+                logger.debug("Pausa %.1f s...", self.delay)
+                time.sleep(self.delay)
 
         return completed, failed
 
@@ -830,9 +991,9 @@ class MultiMethodBatchRunner:
         completed = 0
         failed = 0
 
-        logger.info("Modo PARALELO con %d workers", MAX_WORKERS)
+        logger.info("Modo PARALELO con %d workers", self.max_workers)
 
-        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_job = {
                 executor.submit(self._run_single_job, job): job for job in todo
             }
@@ -850,7 +1011,7 @@ class MultiMethodBatchRunner:
                     logger.error(
                         "FUTURE EXCEPTION | %s/%s/%s [%s]: %s",
                         job["subject"], job["session"], job["task"],
-                        job["method"], exc,
+                        job["method_label"], exc,
                     )
                     failed += 1
 
@@ -868,9 +1029,31 @@ class MultiMethodBatchRunner:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Batch multi-metodo para el pipeline IgA (nueva API 3 etapas). "
+                    "Lee la configuracion desde un JSON.",
+    )
+    parser.add_argument(
+        "--params-json", type=str, default=None,
+        help=(
+            "Ruta al archivo JSON de parametros. "
+            f"Default: {DEFAULT_PARAMS_JSON}"
+        ),
+    )
+    args = parser.parse_args()
+
+    # Determinar ruta del JSON
+    json_path = Path(args.params_json) if args.params_json else DEFAULT_PARAMS_JSON
+    if os.environ.get("BATCH_MM_PARAMS_JSON"):
+        json_path = Path(os.environ["BATCH_MM_PARAMS_JSON"])
+
+    # Cargar parametros
+    params = _load_params(json_path)
+    logger.info("Parametros cargados desde: %s", json_path)
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        runner = MultiMethodBatchRunner()
+        runner = MultiMethodBatchRunner(params)
         return runner.run()
 
 
