@@ -1809,6 +1809,21 @@ def plot_potential_2d(U, edges, U_theoretical=None, title_est="Reconstructed Pot
         x0, x1, y0, y1 = _valid_bbox(U_plot)
         U_plot, edges_plot = _crop_to_valid(U_plot, edges_plot)
 
+    # --- Guardia: si el crop dejó menos de 2x2, contourf no puede ---
+    if U_plot.shape[0] < 2 or U_plot.shape[1] < 2:
+        fig, ax = plt.subplots(figsize=figsize)
+        n_valid = int(np.sum(~np.isnan(U_plot)))
+        ax.text(
+            0.5, 0.5,
+            f"Insufficient valid data for 2D contour\n"
+            f"(cropped shape: {U_plot.shape}, valid cells: {n_valid})",
+            ha="center", va="center", transform=ax.transAxes,
+            fontsize=12, color="gray",
+        )
+        ax.set_title(title_est)
+        fig.tight_layout()
+        return fig
+
     # Campo para las streamlines: el drift (dirección física) tiene prioridad
     # sobre g_recon (dirección de ascenso, g = -D⁻¹f).
     stream_field = reconstructed_drift if reconstructed_drift is not None \
@@ -2032,6 +2047,22 @@ def plot_potential_slice(U, edges, dims=(0, 1), fixed_coords=None,
         if g1 is not None:
             g1 = g1[x0:x1, y0:y1]
             g2 = g2[x0:x1, y0:y1]
+
+    # --- Guardia: si el crop dejó menos de 2x2, contourf no puede ---
+    if U_slice.shape[0] < 2 or U_slice.shape[1] < 2:
+        fig, ax = plt.subplots(figsize=figsize)
+        n_valid = int(np.sum(~np.isnan(U_slice)))
+        ax.text(
+            0.5, 0.5,
+            f"Insufficient valid data for 2D contour\n"
+            f"(slice cropped shape: {U_slice.shape}, valid cells: {n_valid})",
+            ha="center", va="center", transform=ax.transAxes,
+            fontsize=12, color="gray",
+        )
+        ax.set_title(title)
+        fig.tight_layout()
+        return fig
+
     X, Y = np.meshgrid(x, y, indexing='ij')
 
     # --- 3. Extraer corte 2D del teórico (si existe) ---
@@ -2251,6 +2282,20 @@ def plot_nonconservative_force_2d(v_field, edges,
         v1 = v1[x0:x1, y0:y1]
         v2 = v2[x0:x1, y0:y1]
 
+    # --- Guardia: si el crop dejó menos de 2x2, contourf no puede ---
+    if v_mag.shape[0] < 2 or v_mag.shape[1] < 2:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(
+            0.5, 0.5,
+            f"Insufficient valid data for 2D contour\n"
+            f"(v_mag cropped shape: {v_mag.shape})",
+            ha="center", va="center", transform=ax.transAxes,
+            fontsize=12, color="gray",
+        )
+        ax.set_title(title)
+        fig.tight_layout()
+        return fig
+
     X, Y = np.meshgrid(edges_plot[0], edges_plot[1], indexing='ij')
 
     fig, ax = plt.subplots(figsize=figsize)
@@ -2340,7 +2385,22 @@ def plot_potential_combined_2d(U, edges, stream_function=None,
         if g1 is not None:
             g1 = g1[x0:x1, y0:y1]
             g2 = g2[x0:x1, y0:y1]
-    
+
+    # --- Guardia: si el crop dejó menos de 2x2, contourf no puede ---
+    if U_plot.shape[0] < 2 or U_plot.shape[1] < 2:
+        fig, ax = plt.subplots(figsize=figsize)
+        n_valid = int(np.sum(~np.isnan(U_plot)))
+        ax.text(
+            0.5, 0.5,
+            f"Insufficient valid data for 2D contour\n"
+            f"(combined cropped shape: {U_plot.shape}, valid cells: {n_valid})",
+            ha="center", va="center", transform=ax.transAxes,
+            fontsize=12, color="gray",
+        )
+        ax.set_title(title)
+        fig.tight_layout()
+        return fig
+
     if clip_percentile is not None:
         valid_data = U_plot[~np.isnan(U_plot)]
         if len(valid_data) > 0:
