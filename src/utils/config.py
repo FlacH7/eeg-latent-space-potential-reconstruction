@@ -19,6 +19,9 @@ DB_ANPHY_PATH = os.getenv("DB_ANPHY_PATH")
 # Siena Scalp EEG Database
 DB_SIENA_PATH = os.getenv("DB_SIENA_PATH")
 
+# Ludovico 01 Database
+DB_LUDOVICO_01_PATH = os.getenv("DB_LUDOVICO_01_PATH")
+
 # Cache and results
 DATA_SIMULATIONS_CACHE_PATH = os.getenv("DATA_SIMULATIONS_CACHE_PATH")
 BASE_CACHE_PATH = os.getenv("BASE_CACHE_PATH")

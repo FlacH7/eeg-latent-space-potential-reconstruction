@@ -94,3 +94,4 @@ python-dotenv==1.2.2
 torch
 pydiffmap
 pytest
+pandas

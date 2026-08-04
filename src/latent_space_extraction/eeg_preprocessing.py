@@ -154,6 +154,9 @@ def apply_bandpass_filter(
     raw : mne.io.Raw
         The same object, filtered in-place.
     """
+    # Skip filtering if both frequencies are None (non-EEG data)
+    if l_freq is None and h_freq is None:
+        return raw
     raw.filter(l_freq=l_freq, h_freq=h_freq, verbose=verbose)
     return raw
 
