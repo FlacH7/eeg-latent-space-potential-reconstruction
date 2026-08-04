@@ -138,7 +138,7 @@
 
   "execution": {
     "delay": 2.0,
-    "max_workers": 3,
+    "max_workers": 4,
     "run_postprocess": true,
     "log_level": "INFO"
   },
