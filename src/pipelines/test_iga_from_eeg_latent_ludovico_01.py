@@ -1,0 +1,740 @@
+#!/usr/bin/env python3
+"""
+test_iga_from_eeg_latent_ludovico_01.py
+=======================================
+Pipeline de Kramers-Moyal + IgA reconstruction para el dataset **Ludovico_01**.
+
+A diferencia del pipeline de EEG (test-retest Gedai), este:
+
+1. **Carga datos desde CSV** (columnas = canales, filas = muestras) via
+   ``load_ludovico_01_from_ids``.
+2. **No aplica filtrado de frecuencia** (``l_freq`` / ``h_freq`` no se usan).
+3. **No aplica ICA ni ICLabel** (los datos no son EEG).  Cuando el stage2
+   es ``pca_ica``, se reemplaza internamente por ``pca`` para evitar
+   errores de ICA sobre datos no-EEG.
+4. **Frecuencia de muestreo asumida**: 1000 Hz (1 ms por muestra).
+5. **Sesión y tarea son ficticias**: ``session1``, ``default``.
+
+Los resultados se guardan bajo ``results/ludovico_01/<subject>/``.
+
+Usage::
+
+    python -m src.pipelines.test_iga_from_eeg_latent_ludovico_01 \
+        --subject data_01_23_18 --t-start 0 --t-end 10 \
+        --stage1-embedding hankel --stage2-dynamics dmd --stage3-selection top_n
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+import time
+import warnings
+from pathlib import Path
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# ---------------------------------------------------------------------------
+# Ensure package is importable
+# ---------------------------------------------------------------------------
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.latent_space_extraction.extract_latent_subspace import (
+    extract_latent_space,
+)
+
+from src.potential_reconstruction.km_tools_v2 import (
+    extract_km_coefficients,
+    plot_km_components,
+    reconstruct_potential,
+    reconstruct_potential_1D,
+    plot_potential,
+    plot_potential_2d,
+    plot_potential_slice,
+    plot_nonconservative_force_2d,
+    plot_potential_combined_2d,
+)
+from src.potential_reconstruction.bw_optimization import optimal_bw
+
+from src.latent_space_extraction.ludovico_01_eeg import (
+    load_ludovico_01_from_ids,
+    DEFAULT_SFREQ,
+)
+
+from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
+
+from src.latent_space_extraction.ck_test import chapman_kolmogorov_test
+
+from src.utils.io import save_potential
+
+from src.plotters.trajectory_plots import plot_latent_trajectory
+
+from src.utils.config import (
+    CONFIGS,
+    BASE_RESULTS_PATH,
+    BASE_CACHE_PATH,
+)
+
+# Try to import Ludovico_01 path from config
+try:
+    from src.utils.config import DB_LUDOVICO_01_PATH
+except (ImportError, AttributeError):
+    DB_LUDOVICO_01_PATH = None
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="KM + IgA pipeline for Ludovico_01 CSV data (non-EEG)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # ---- Data source ----
+    parser.add_argument("--subject", type=str, required=True,
+                        help="Subject/filename ID (e.g. data_01_23_18, without .csv)")
+    parser.add_argument("--db-path", type=str, default=None,
+                        help="Override Ludovico_01 dataset root path")
+    parser.add_argument("--sfreq", type=float, default=DEFAULT_SFREQ,
+                        help=f"Sampling frequency in Hz (default: {DEFAULT_SFREQ})")
+    parser.add_argument("--t-start", type=float, default=None,
+                        help="Start time (s) for the segment to analyze.")
+    parser.add_argument("--t-end", type=float, default=None,
+                        help="End time (s) for the segment to analyze.")
+    # ---- Cache / persistence ----
+    parser.add_argument("--cache-file", type=str, default=None,
+                        help="Path to cache file for the latent space.")
+    parser.add_argument("--ignore-cache", action="store_true",
+                        help="Ignore an existing cache file and force recomputation.")
+    # ---- Latent-space extraction params ----
+    parser.add_argument("--latent-dim", type=int, default=2,
+                        help="Dimensionality of the latent subspace (default: 2)")
+    # ---- 3-stage pipeline API ----
+    parser.add_argument("--stage1-embedding", type=str, default=None,
+                        choices=["none", "hankel"],
+                        help="Stage 1 embedding.")
+    parser.add_argument("--stage1-params", type=str, default=None,
+                        help='JSON dict of Stage-1 params, e.g. \'{"depth": 250}\'')
+    parser.add_argument("--stage2-dynamics", type=str, default=None,
+                        choices=["pca_ica", "pca", "dmd", "diffusion_maps"],
+                        help="Stage 2 dynamics.")
+    parser.add_argument("--stage2-params", type=str, default=None,
+                        help='JSON dict of Stage-2 params.')
+    parser.add_argument("--stage3-selection", type=str, default=None,
+                        choices=["top_n", "markov_fastest", "markov_slowest"],
+                        help="Stage 3 selection.")
+    parser.add_argument("--stage3-params", type=str, default=None,
+                        help='JSON dict of Stage-3 params.')
+    # ---- Additional latent-space params ----
+    parser.add_argument("--analysis-dim", type=int, default=None,
+                        help="Number of latent dimensions for KM. Default: all.")
+    parser.add_argument("--column", type=int, default=None,
+                        help="If analysis-dim=1, which latent column to use (0=first).")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Number of parallel processes for subspace search.")
+    parser.add_argument("--n-bins", type=int, default=10,
+                        help="Quantile bins for Markov discretisation (default: 10).")
+    parser.add_argument("--search-strategy", type=str, default="exhaustive",
+                        choices=["exhaustive", "greedy"])
+    # ---- Hankel ----
+    parser.add_argument("--hankel-embedding-depth", type=int, default=None,
+                        help="Hankel embedding depth T.")
+    # ---- Diffusion Maps params ----
+    parser.add_argument("--diffusion-sigma", type=float, default=None)
+    parser.add_argument("--diffusion-k", type=int, default=100)
+    parser.add_argument("--diffusion-time", type=float, default=0.0)
+    parser.add_argument("--diffusion-alpha", type=float, default=0.5)
+    # ---- KM ----
+    parser.add_argument("--km-bins", type=int, default=40,
+                        help="Number of bins per dimension for KM estimation.")
+    # ---- Output ----
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="Directory to save plots.")
+    parser.add_argument("--save-potential", action="store_true", default=True)
+    parser.add_argument("--no-save-potential", action="store_true",
+                        help="Disable saving potential data.")
+    parser.add_argument("--verbose", action="store_true", default=True)
+
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline-spec resolution
+# ---------------------------------------------------------------------------
+
+
+def _json_params(raw: str | None) -> dict:
+    if raw is None:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Stage params must be a JSON object, got: {raw!r}")
+    return parsed
+
+
+def _resolve_pipeline_spec(args: argparse.Namespace) -> dict:
+    """Resolve the 3-stage spec, replacing pca_ica → pca for non-EEG data."""
+    use_new_api = any([
+        args.stage1_embedding is not None,
+        args.stage2_dynamics is not None,
+        args.stage3_selection is not None,
+    ])
+
+    if use_new_api:
+        s1 = None if args.stage1_embedding in (None, "none") else args.stage1_embedding
+        s2 = args.stage2_dynamics or "pca"
+        s3 = args.stage3_selection or "top_n"
+
+        # Ludovico_01 is NOT EEG → replace pca_ica with pca to avoid ICA
+        if s2 == "pca_ica":
+            print("  [Ludovico01] Replacing stage2 'pca_ica' with 'pca' (no ICA for non-EEG data)")
+            s2 = "pca"
+
+        p1 = _json_params(args.stage1_params)
+        p2 = _json_params(args.stage2_params)
+        p3 = _json_params(args.stage3_params)
+
+        # Inject CLI convenience flags
+        if s1 == "hankel":
+            p1.setdefault("depth", args.hankel_embedding_depth)
+        if s2 == "diffusion_maps":
+            p2.setdefault("sigma", args.diffusion_sigma)
+            p2.setdefault("k", args.diffusion_k)
+            p2.setdefault("diffusion_time", args.diffusion_time)
+            p2.setdefault("alpha", args.diffusion_alpha)
+        if s3 in ("markov_fastest", "markov_slowest"):
+            p3.setdefault("n_bins", args.n_bins)
+            p3.setdefault("search_strategy", args.search_strategy)
+
+        return {
+            "stage1_embedding": s1,
+            "stage1_params": p1,
+            "stage2_dynamics": s2,
+            "stage2_params": p2,
+            "stage3_selection": s3,
+            "stage3_params": p3,
+        }
+
+    # Default when no stage args given
+    return {
+        "stage1_embedding": None,
+        "stage1_params": {},
+        "stage2_dynamics": "pca",
+        "stage2_params": {},
+        "stage3_selection": "top_n",
+        "stage3_params": {},
+    }
+
+
+def _spec_label(spec: dict) -> str:
+    s1 = spec["stage1_embedding"] or "none"
+    return f"{s1}+{spec['stage2_dynamics']}+{spec['stage3_selection']}"
+
+
+def _spec_hash(spec: dict) -> str:
+    payload = json.dumps(spec, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    args = _parse_args()
+    if args.out_dir is None:
+        args.out_dir = BASE_RESULTS_PATH
+    verbose = "INFO" if args.verbose else None
+
+    save_potential_flag = args.save_potential and not args.no_save_potential
+
+    # Defaults for time window
+    if args.t_start is None:
+        args.t_start = 0.0
+    if args.t_end is None:
+        args.t_end = 10.0
+
+    db_path = args.db_path or DB_LUDOVICO_01_PATH
+
+    # Resolve the 3-stage spec
+    spec = _resolve_pipeline_spec(args)
+    spec_label = _spec_label(spec)
+    spec_hash = _spec_hash(spec)
+    print(f"\n  Pipeline spec : {spec_label}  (hash {spec_hash})")
+    print(f"  Stage params  : {json.dumps(spec, default=str)}")
+
+    # -----------------------------------------------------------------
+    # Output directory: ludovico_01/<subject>/...
+    # -----------------------------------------------------------------
+    out_dir = Path(
+        args.out_dir
+        + f"/ludovico_01/{args.subject}/session1"
+        + f"/{args.latent_dim}_latent_dim_{spec_label}_{spec_hash}"
+        + f"/from{args.t_start}s_to_{args.t_end}s_default"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    overall_t0 = time.time()
+
+    # =================================================================
+    # 1. LOAD CSV DATA
+    # =================================================================
+    print("=" * 70)
+    print("  STAGE 0: LOAD LUDOVICO_01 CSV DATA")
+    print("=" * 70)
+
+    try:
+        raw = load_ludovico_01_from_ids(
+            subject=args.subject,
+            db_path=db_path,
+            sfreq=args.sfreq,
+            t_start=args.t_start,
+            t_stop=args.t_end,
+            preload=False,
+            verbose=verbose,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    sfreq = args.sfreq
+    print(f"  Selected channels : {len(raw.ch_names)}")
+    print(f"  Channel names     : {raw.ch_names[:5]}{'...' if len(raw.ch_names) > 5 else ''}")
+    print(f"  Sampling freq     : {sfreq:.2f} Hz")
+    print(f"  Cropped window    : {raw.times[0]:.2f} s -> {raw.times[-1]:.2f} s "
+          f"(duration: {raw.times[-1] - raw.times[0]:.2f} s)")
+
+    # =================================================================
+    # 2. EXTRACT LATENT SUBSPACE
+    # =================================================================
+    print("\n" + "=" * 70)
+    print("  STAGE 1: EXTRACT LATENT SUBSPACE")
+    print("=" * 70)
+
+    # Cache path
+    if args.cache_file is None:
+        args.cache_file = Path(
+            BASE_CACHE_PATH
+            + f"/cache_ludovico_01/{args.subject}/session1"
+            + f"/task_default_latent_dim_{args.latent_dim}_{spec_label}_{spec_hash}"
+            + f"/from{args.t_start}s_to{args.t_end}s.npz"
+        )
+    cache_path = Path(args.cache_file)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Try cache
+    if cache_path.exists() and not args.ignore_cache:
+        print(f"\n  [CACHE] Found existing cache: {cache_path}")
+        print("  [CACHE] Loading latent space and metadata...")
+        loaded = np.load(cache_path, allow_pickle=True)
+        latent = loaded["latent"]
+        meta = loaded["meta"].item()
+        print("  [CACHE] Loaded successfully.")
+        if "preprocessing" not in meta or "elapsed_time" not in meta:
+            print("  [WARN] Cache file seems corrupted or outdated. Recomputing...")
+            args.ignore_cache = True
+
+    # Compute if no cache
+    if not cache_path.exists() or args.ignore_cache:
+        if args.ignore_cache and cache_path.exists():
+            print("\n  [CACHE] --ignore-cache set. Recomputing latent space...")
+
+        # Ludovico_01 is NOT EEG → pass None for l_freq, h_freq to skip filtering
+        # The extract_latent_space function skips filtering when l_freq=None
+        latent, meta = extract_latent_space(
+            raw,
+            n_dim=args.latent_dim,
+            stage1_embedding=spec["stage1_embedding"],
+            stage1_params=spec["stage1_params"],
+            stage2_dynamics=spec["stage2_dynamics"],
+            stage2_params=spec["stage2_params"],
+            stage3_selection=spec["stage3_selection"],
+            stage3_params=spec["stage3_params"],
+            l_freq=None,   # No frequency filtering for non-EEG data
+            h_freq=None,   # No frequency filtering for non-EEG data
+            n_workers=args.workers,
+            verbose=verbose,
+        )
+
+        print(f"\n  [CACHE] Saving latent space to: {cache_path}")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(cache_path, latent=latent, meta=np.array(meta, dtype=object))
+        print("  [CACHE] Saved successfully.")
+
+    n_samples, latent_dim = latent.shape
+    dt = 1.0 / sfreq
+    print(f"\n  dt = {dt:.6f} s")
+    print(f"  Latent space shape : {latent.shape}")
+    print(f"  Selected ICs       : {meta['selected_indices']}")
+    print(f"  Scores             : {meta['latent_scores']}")
+    print(f"  Extraction time    : {meta['elapsed_time']:.1f} s")
+
+    # Plot latent trajectory
+    plot_latent_trajectory(
+        latent,
+        out_dir=out_dir,
+        method_name=spec_label,
+    )
+
+    # =================================================================
+    # 3. SELECT DIMENSION(S) FOR KM ANALYSIS
+    # =================================================================
+    analysis_dim = args.analysis_dim if args.analysis_dim is not None else latent_dim
+
+    if analysis_dim > latent_dim:
+        raise ValueError(
+            f"analysis-dim ({analysis_dim}) cannot exceed latent-dim ({latent_dim})"
+        )
+
+    if analysis_dim == 1:
+        col = args.column if args.column is not None else 0
+        if col >= latent_dim:
+            raise ValueError(f"column ({col}) must be < latent-dim ({latent_dim})")
+        data = latent[:, col:col + 1]
+        print(f"\n  Using latent column {col} for 1D KM analysis")
+    else:
+        data = latent[:, :analysis_dim]
+        print(f"\n  Using first {analysis_dim} latent columns for KM analysis")
+
+    ck_result = chapman_kolmogorov_test(
+        data, dt=dt, n_bins=20, threshold=0.15,
+        plot=True, out_dir=out_dir, verbose=True,
+    )
+
+    if not ck_result["is_markovian"]:
+        print("\n  [WARN] Latent space is NOT Markovian. KM results may be invalid.")
+    else:
+        print(f"\n  [OK] Markovian at tau* = {ck_result['tau_star']:.4f} s "
+              f"({ck_result['tau_star_idx']} steps)")
+
+    D = analysis_dim
+    print(f"  Data shape for KM  : {data.shape}")
+
+    # Plot latent time series
+    fig_ts, axes = plt.subplots(D, 1, figsize=(14, 2.5 * D), squeeze=False)
+    for d in range(D):
+        ax = axes[d, 0]
+        ax.plot(data[:, d], lw=0.5)
+        ax.set_title(f"Latent dimension {d}")
+        ax.set_xlabel("sample")
+        ax.set_ylabel("amplitude")
+    plt.tight_layout()
+    fig_ts.savefig(out_dir / "latent_timeseries.png", dpi=150)
+    plt.close(fig_ts)
+    print(f"  Saved latent_timeseries.png")
+
+    data = outliers_cleaning(data, method="iqr", threshold=5)
+
+    # Plot cleaned
+    fig_ts, axes = plt.subplots(D, 1, figsize=(14, 2.5 * D), squeeze=False)
+    for d in range(D):
+        ax = axes[d, 0]
+        ax.plot(data[:, d], lw=0.5)
+        ax.set_title(f"Latent dimension {d} (after outlier cleaning)")
+        ax.set_xlabel("sample")
+        ax.set_ylabel("amplitude")
+    plt.tight_layout()
+    fig_ts.savefig(out_dir / "latent_timeseries_cleaned.png", dpi=150)
+    plt.close(fig_ts)
+    print(f"  Saved latent_timeseries_cleaned.png")
+
+    # =================================================================
+    # 4. CONFIGURATION
+    # =================================================================
+    config = CONFIGS['base_2D_model'].copy()
+    config.update({
+        "model_name": f"ludovico_01_{args.subject}_d{latent_dim}_{spec_label}",
+        "D": D,
+        "bins": [args.km_bins] * D,
+        "drift_components": list(range(D)),
+        "diff_components": [(i, i) for i in range(D)],
+        "degree": 2,
+    })
+    print(f"\n  KM config: {config}")
+
+    # =================================================================
+    # 5. BANDWIDTH OPTIMISATION
+    # =================================================================
+    print("\n" + "=" * 70)
+    print("  STAGE 2: BANDWIDTH OPTIMISATION")
+    print("=" * 70)
+
+    result_bw = optimal_bw(
+        data=data,
+        bins=config["bins"],
+        dt=dt,
+        p=2,
+        kernel="epanechnikov",
+        theoretical=None,
+        sigma_smooth=1.0,
+        n_candidates=30,
+        n_jobs=-1 if D + config["degree"] <= 4 else 1,
+        plot=True,
+        auto_weight=True,
+    )
+    bw_opt = result_bw["optimal_bw"]
+    print(f"\n  Optimal bandwidth: {bw_opt:.4f}")
+
+    if "fig" in result_bw:
+        result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
+        plt.close(result_bw["fig"])
+
+    # =================================================================
+    # 6. ESTIMATE KM COEFFICIENTS
+    # =================================================================
+    print("\n" + "=" * 70)
+    print("  STAGE 3: KM COEFFICIENT ESTIMATION")
+    print("=" * 70)
+
+    drift, diffusion, edges = extract_km_coefficients(
+        data, bins=config["bins"], p=2, bw=bw_opt,
+        kernel="epanechnikov", dt=dt, sigma_smooth=1.0,
+        density_threshold=0.01,
+    )
+
+    print(f"\n  Drift shape    : {drift.shape}")
+    print(f"  Diffusion shape: {diffusion.shape}")
+
+    # =================================================================
+    # 7. EMPIRICAL DENSITY
+    # =================================================================
+    hist_edges = []
+    for d in range(D):
+        c = edges[d]
+        half = (c[1] - c[0]) / 2.0 if len(c) > 1 else 0.5
+        e = np.concatenate([[c[0] - half], c + half])
+        hist_edges.append(e)
+
+    density, _ = np.histogramdd(data, bins=hist_edges)
+    density = density.astype(float)
+
+    # =================================================================
+    # 8. PLOT KM COMPONENTS
+    # =================================================================
+    figs_km = plot_km_components(
+        drift, diffusion, edges,
+        drift_components=config["drift_components"],
+        diff_components=config["diff_components"],
+        fixed_coords=None, theoretical=None,
+        figsize=(12, 8),
+    )
+    for key, fname in [("drift", "km_components_drift.png"),
+                       ("diffusion", "km_components_diffusion.png")]:
+        fig_km = figs_km.get(key)
+        if fig_km is None:
+            continue
+        fig_km.suptitle("...", fontsize=14)
+        fig_km.tight_layout(rect=[0, 0, 1, 0.95])
+        fig_km.savefig(out_dir / fname, dpi=150)
+        plt.close(fig_km)
+    print(f"  Saved km components figures")
+
+    # =================================================================
+    # 9. 1D POTENTIAL RECONSTRUCTION
+    # =================================================================
+    print("\n" + "=" * 70)
+    print("  STAGE 4: 1D POTENTIAL RECONSTRUCTION (IgA)")
+    print("=" * 70)
+
+    U_rec_1d = reconstruct_potential_1D(
+        drift, diffusion, edges, density=density, degree=config["degree"],
+    )
+
+    fig_pot_1d = plot_potential(
+        U_rec_1d, edges, theoretical=None,
+        component_labels=[f"x{j + 1}" for j in range(D)],
+        figsize=(5 * D, 4),
+    )
+    plt.suptitle(f"{config['model_name'].upper()} -- Reconstructed 1D potential (IgA)")
+    plt.tight_layout()
+    fig_pot_1d.savefig(out_dir / "potential_1d.png", dpi=150)
+    plt.close(fig_pot_1d)
+    print(f"  Saved potential_1d.png")
+
+    # =================================================================
+    # 10. FULL MULTIDIMENSIONAL POTENTIAL RECONSTRUCTION
+    # =================================================================
+    print("\n" + "=" * 70)
+    print("  STAGE 5: FULL MULTIDIMENSIONAL POTENTIAL (IgA)")
+    print("=" * 70)
+
+    result_iga = reconstruct_potential(
+        drift, diffusion, edges, density=density,
+        method="iga", return_full=True, degree=config["degree"],
+        decompose_helmholtz=True, density_threshold=0.01,
+        rtol=1e-6, atol=1e-12, compute_stream_function=True,
+    )
+
+    U_rec = result_iga["potential"]
+    print(f"\n  Reconstructed potential shape: {U_rec.shape}")
+
+    # Quality metrics
+    rank_D = result_iga["rank_D"]
+    condition_D = result_iga["condition_D"]
+    frac_low_rank = np.mean(rank_D < D) if np.any(~np.isnan(rank_D)) else 0.0
+    print(f"  Fraction cells with rank_D < {D}: {frac_low_rank:.2%}")
+    print(f"  Condition D (median): {np.nanmedian(condition_D):.2e}")
+
+    if "eta" in result_iga:
+        eta = result_iga["eta"]
+        is_eq = result_iga["is_equilibrium"]
+        print(f"  Non-equilibrium metric eta: {eta:.4f}")
+        print(f"  Detailed balance? {is_eq} (threshold eta < 0.1)")
+
+    # Save potential data
+    if save_potential_flag:
+        metadata = {
+            "subject": args.subject,
+            "session": "session1",
+            "task": "default",
+            "t_start": args.t_start,
+            "t_end": args.t_end,
+            "latent_dim": latent_dim,
+            "analysis_dim": D,
+            "pipeline": spec_label,
+            "pipeline_spec": {k: v for k, v in spec.items()
+                             if k.endswith("params") or k.startswith("stage")},
+        }
+
+        potential_path = save_potential(
+            result_iga=result_iga, edges=edges, density=density,
+            config=config, out_dir=out_dir, metadata=metadata,
+            filename="potential_data.npz",
+        )
+        print(f"  Potential data saved: {potential_path}")
+
+    # =================================================================
+    # 11. PLOT 2D / SLICES
+    # =================================================================
+    print("\n" + "=" * 70)
+    print("  STAGE 6: PLOT 2D / SLICES")
+    print("=" * 70)
+
+    if D == 2:
+        # Potential 2D (no streamlines)
+        fig_pot_2d = plot_potential_2d(
+            U_rec, edges,
+            title_est=f"{config['model_name'].upper()} -- Reconstructed",
+            figsize=(12, 5), unify_colorbar=True,
+            align_minima=True, align_to_zero=True,
+            crop_to_valid=True, show_streamlines=False,
+            stream_function=result_iga.get('stream_function'),
+            reconstructed_field=result_iga.get('reconstructed_field'),
+        )
+        if fig_pot_2d is None:
+            fig_pot_2d = plt.gcf()
+        fig_pot_2d.savefig(out_dir / "potential_2d.png", dpi=150)
+        plt.close(fig_pot_2d)
+        print("  Saved potential_2d.png")
+
+        # Potential 2D with streamlines
+        fig_pot_2d = plot_potential_2d(
+            U_rec, edges,
+            title_est=f"{config['model_name'].upper()} -- Reconstructed",
+            figsize=(12, 5), unify_colorbar=True,
+            align_minima=True, align_to_zero=True,
+            crop_to_valid=True,
+            stream_function=result_iga.get('stream_function'),
+            reconstructed_field=result_iga.get('reconstructed_field'),
+        )
+        if fig_pot_2d is None:
+            fig_pot_2d = plt.gcf()
+        fig_pot_2d.savefig(out_dir / "potential_2d_streamlines.png", dpi=150)
+        plt.close(fig_pot_2d)
+        print("  Saved potential_2d_streamlines.png")
+
+        # Residual
+        if "residual" in result_iga:
+            residual = result_iga["residual"]
+            r_norm = np.sqrt(np.nansum(residual**2, axis=0))
+            x_c, y_c = edges
+            X, Y = np.meshgrid(x_c, y_c, indexing="ij")
+            fig_res = plt.figure(figsize=(6, 5))
+            plt.contourf(X, Y, np.nan_to_num(r_norm, nan=0), levels=20, cmap="magma")
+            plt.colorbar(label="||r||")
+            plt.xlabel("x")
+            plt.ylabel("y")
+            plt.title(f"Residuo Helmholtz -- {config['model_name'].upper()}")
+            plt.axis("equal")
+            plt.tight_layout()
+            fig_res.savefig(out_dir / "potential_2d_residual.png", dpi=150)
+            plt.close(fig_res)
+            print("  Saved potential_2d_residual.png")
+
+        # Non-conservative force
+        if result_iga.get('nonconservative_force') is not None:
+            fig_v = plot_nonconservative_force_2d(
+                result_iga['nonconservative_force'], edges,
+                title=f"Fuerza no-conservativa -- {config['model_name'].upper()}",
+                crop_to_valid=True,
+            )
+            fig_v.savefig(out_dir / "potential_2d_nonconservative_force.png", dpi=150)
+            plt.close(fig_v)
+            print("  Saved potential_2d_nonconservative_force.png")
+
+        # Combined
+        if (result_iga.get('reconstructed_field') is not None
+                or result_iga.get('nonconservative_force') is not None):
+            fig_comb = plot_potential_combined_2d(
+                U_rec, edges,
+                stream_function=result_iga.get('stream_function'),
+                nonconservative_force=result_iga.get('nonconservative_force'),
+                reconstructed_field=result_iga.get('reconstructed_field'),
+                title=f"{config['model_name'].upper()} -- Combined",
+                crop_to_valid=True,
+            )
+            fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
+            plt.close(fig_comb)
+            print("  Saved potential_2d_combined.png")
+
+    elif D >= 3:
+        dim_pairs = [(i, j) for i in range(min(D, 3)) for j in range(i + 1, min(D, 3))]
+        for dims in dim_pairs:
+            fig_slice = plot_potential_slice(
+                U_rec, edges, dims=dims,
+                fixed_coords={d: 0.0 for d in range(D) if d not in dims},
+                title=f"{config['model_name'].upper()} -- slice x{dims[0]+1}-x{dims[1]+1}",
+                figsize=(12, 5), unify_colorbar=True,
+                align_minima=True, align_to_zero=True, crop_to_valid=True,
+            )
+            if fig_slice is None:
+                fig_slice = plt.gcf()
+            fname = f"potential_slice_x{dims[0]+1}_x{dims[1]+1}.png"
+            fig_slice.savefig(out_dir / fname, dpi=150)
+            plt.close(fig_slice)
+            print(f"  Saved {fname}")
+
+    # =================================================================
+    # 12. SUMMARY
+    # =================================================================
+    total_time = time.time() - overall_t0
+    print("\n" + "=" * 70)
+    print("  PIPELINE COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+    print(f"  Subject             : {args.subject}")
+    print(f"  Pipeline            : {spec_label} (hash {spec_hash})")
+    print(f"  Time window         : {args.t_start:.1f}s -> {args.t_end:.1f}s")
+    print(f"  Total wall-clock    : {total_time:.1f} s")
+    print(f"  Output saved to     : {out_dir.absolute()}")
+    if save_potential_flag:
+        print(f"  Potential data      : {out_dir / 'potential_data.npz'}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sys.exit(main())
