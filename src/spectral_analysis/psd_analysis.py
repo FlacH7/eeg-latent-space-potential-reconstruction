@@ -14,8 +14,11 @@ Módulo no invasivo que se integra en los pipelines existentes
 4. :func:`load_psd_data` — carga de los ``.npz`` generados.
 
 Método espectral: multitaper de MNE (tapers DPSS/Slepian) con pesos
-adaptativos y ``low_bias=True``. Si se usa Welch como fallback en algún
-punto, la ventana debe ser ``'hann'``.
+adaptativos y ``low_bias=True``. Para señales largas (cuando el número
+de tapers de una pasada única supera ``MAX_TAPERS_SINGLE_SHOT``) se usa
+automáticamente un multitaper segmentado con solape del 50 % y promedio
+de PSDs, para acotar el coste en tiempo y memoria. Si se usa Welch como
+fallback en algún punto, la ventana debe ser ``'hann'``.
 """
 
 from __future__ import annotations
@@ -59,6 +62,12 @@ DEFAULT_FMAX = 100.0
 DEFAULT_BANDWIDTH = 2.5
 # §7.4: con más de 64 canales se pagina la matriz de subplots.
 MAX_CHANNELS_PER_FIG = 64
+# Máximo de tapers DPSS para un multitaper de una sola pasada. Por encima
+# (señales largas: half_nbw = bandwidth·N/(2·sfreq) crece con N) se usa un
+# multitaper segmentado con solape del 50 %, porque el coste en tiempo y
+# memoria del cálculo full-signal se vuelve inviable (p. ej. ~749 tapers
+# de 150 000 muestras para 300 s a 500 Hz con bandwidth=2.5).
+MAX_TAPERS_SINGLE_SHOT = 16
 _EPS = np.finfo(float).tiny
 
 
@@ -101,23 +110,82 @@ def _effective_fmax(fmax: float, sfreq: float) -> float:
     return fmax_eff
 
 
-def _multitaper_array(
+def _multitaper_auto(
     x: np.ndarray, sfreq: float, fmin: float, fmax: float, bandwidth: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """PSD multitaper de una señal 1D (n_jobs=1 para evitar paralelización anidada)."""
-    psd, freqs = psd_array_multitaper(
-        x,
-        sfreq=sfreq,
-        fmin=fmin,
-        fmax=fmax,
-        bandwidth=bandwidth,
-        adaptive=True,
-        low_bias=True,
-        normalization="length",
-        n_jobs=1,
-        verbose=False,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """PSD multitaper de señales ``(n_series, n_times)`` con segmentación automática.
+
+    El número de tapers DPSS de una pasada única crece con la duración de
+    la señal (``2·half_nbw − 1`` con ``half_nbw = bandwidth·N/(2·sfreq)``)
+    y con él el coste en tiempo y memoria, que se vuelve inviable para
+    registros largos (p. ej. ~749 tapers de 150 000 muestras para 300 s a
+    500 Hz con ``bandwidth=2.5``). Cuando supera
+    ``MAX_TAPERS_SINGLE_SHOT``, la señal se divide en segmentos con
+    solape del 50 %, se calcula el multitaper por segmento y se promedian
+    los PSD (estilo Welch-multitaper): el número de tapers por segmento
+    queda acotado y el coste crece solo linealmente con la duración.
+
+    Parameters
+    ----------
+    x:
+        Señales ``(n_series, n_times)``.
+
+    Returns
+    -------
+    psds, freqs, info:
+        ``psds``: ``(n_series, n_freqs)``; ``info``: dict con el modo
+        (``"single"`` | ``"segmented"``), ``n_segments``,
+        ``segment_length_s``, ``n_tapers`` y ``overlap``.
+    """
+    x = np.atleast_2d(np.asarray(x, dtype=float))
+    n_times = x.shape[-1]
+    half_nbw_full = bandwidth * n_times / (2.0 * sfreq)
+    kmax_full = max(int(2.0 * half_nbw_full - 1.0), 1)
+
+    if kmax_full <= MAX_TAPERS_SINGLE_SHOT:
+        psds, freqs = psd_array_multitaper(
+            x, sfreq=sfreq, fmin=fmin, fmax=fmax, bandwidth=bandwidth,
+            adaptive=True, low_bias=True, normalization="length",
+            n_jobs=1, verbose=False,
+        )
+        info = {
+            "windowing": "single",
+            "n_segments": 1,
+            "segment_length_s": n_times / sfreq,
+            "n_tapers": kmax_full,
+        }
+        return np.atleast_2d(np.asarray(psds, dtype=float)), np.asarray(freqs, dtype=float), info
+
+    # Segmentado: cada segmento produce como mucho MAX_TAPERS_SINGLE_SHOT
+    # tapers; solape del 50 % y promedio de los PSD por segmento.
+    n_per_seg = int(round((MAX_TAPERS_SINGLE_SHOT + 1) * sfreq / bandwidth))
+    n_per_seg = min(n_per_seg, n_times)
+    step = max(n_per_seg // 2, 1)
+    starts = list(range(0, n_times - n_per_seg + 1, step))
+    if not starts:
+        starts = [0]
+    acc, freqs = None, None
+    for s in starts:
+        psd_seg, freqs = psd_array_multitaper(
+            x[:, s : s + n_per_seg], sfreq=sfreq, fmin=fmin, fmax=fmax,
+            bandwidth=bandwidth, adaptive=True, low_bias=True,
+            normalization="length", n_jobs=1, verbose=False,
+        )
+        acc = np.asarray(psd_seg, dtype=float) if acc is None else acc + psd_seg
+    psds = acc / len(starts)
+    info = {
+        "windowing": "segmented",
+        "n_segments": len(starts),
+        "segment_length_s": n_per_seg / sfreq,
+        "n_tapers": MAX_TAPERS_SINGLE_SHOT,
+        "overlap": 0.5,
+    }
+    logger.info(
+        "PSD multitaper segmentado: N=%d muestras (%d segmentos de %.1f s, "
+        "solape 50%%, ~%d tapers/segmento) para acotar el coste.",
+        n_times, len(starts), n_per_seg / sfreq, MAX_TAPERS_SINGLE_SHOT,
     )
-    return np.asarray(psd, dtype=float).ravel(), np.asarray(freqs, dtype=float)
+    return np.atleast_2d(np.asarray(psds, dtype=float)), np.asarray(freqs, dtype=float), info
 
 
 def _compute_latent_psds(
@@ -129,12 +197,8 @@ def _compute_latent_psds(
 ) -> tuple[np.ndarray, np.ndarray]:
     """PSD de cada dimensión latente. Devuelve (psds (n_dim, n_freqs), freqs)."""
     fmax_eff = _effective_fmax(fmax, sfreq)
-    n_dim = latent.shape[1]
-    psds, freqs = [], None
-    for d in range(n_dim):
-        psd_d, freqs = _multitaper_array(latent[:, d], sfreq, fmin, fmax_eff, bandwidth)
-        psds.append(psd_d)
-    return np.stack(psds), freqs
+    psds, freqs, _ = _multitaper_auto(latent.T, sfreq, fmin, fmax_eff, bandwidth)
+    return psds, freqs
 
 
 def _resolve_channel_names(raw: mne.io.Raw, meta: dict | None, n_channels: int) -> list[str]:
@@ -228,19 +292,9 @@ def compute_and_plot_raw_psd(
         ch_names = [raw.ch_names[i] for i in idx]
         sfreq = float(raw.info["sfreq"])
         fmax_eff = _effective_fmax(fmax, sfreq)
-        spectrum = raw.compute_psd(
-            method="multitaper",
-            fmin=fmin,
-            fmax=fmax_eff,
-            bandwidth=bandwidth,
-            adaptive=True,
-            low_bias=True,
-            normalization="length",
-            picks=idx,
-            verbose=False,
+        psds, freqs, mt_info = _multitaper_auto(
+            raw.get_data(picks=idx), sfreq, fmin, fmax_eff, bandwidth
         )
-        psds = spectrum.get_data()
-        freqs = np.asarray(spectrum.freqs, dtype=float)
         mean_psd = psds.mean(axis=0)
         std_psd = psds.std(axis=0)
         metadata = {
@@ -254,6 +308,7 @@ def compute_and_plot_raw_psd(
             "normalization": "length",
             "n_channels": len(ch_names),
             "sfreq": sfreq,
+            **mt_info,
         }
         np.savez(
             data_path,
@@ -353,7 +408,7 @@ def compute_and_plot_latent_psd(
         logger.info("PSD latente cargado desde caché: %s", data_path)
     else:
         fmax_eff = _effective_fmax(fmax, float(sfreq))
-        psds, freqs = _compute_latent_psds(latent, float(sfreq), fmin, fmax_eff, bandwidth)
+        psds, freqs, mt_info = _multitaper_auto(latent.T, float(sfreq), fmin, fmax_eff, bandwidth)
         mean_psd = psds.mean(axis=0)
         std_psd = psds.std(axis=0)
         metadata = {
@@ -368,6 +423,7 @@ def compute_and_plot_latent_psd(
             "latent_dim": int(n_dim),
             "n_samples": int(n_samples),
             "sfreq": float(sfreq),
+            **mt_info,
         }
         np.savez(
             data_path,
