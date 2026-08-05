@@ -83,6 +83,13 @@ from src.utils.io import save_potential
 
 from src.plotters.trajectory_plots import plot_latent_trajectory
 
+# --- Módulo de análisis espectral de potencia (PSD) ---
+from src.spectral_analysis.psd_analysis import (
+    compute_and_plot_raw_psd,
+    compute_and_plot_latent_psd,
+    compute_channel_influence_on_latent,
+)
+
 from src.utils.config import (
     CONFIGS,
     BASE_RESULTS_PATH,
@@ -376,6 +383,13 @@ def main() -> int:
     print(f"  Cropped window    : {raw.times[0]:.2f} s -> {raw.times[-1]:.2f} s "
           f"(duration: {raw.times[-1] - raw.times[0]:.2f} s)")
 
+    # -----------------------------------------------------------------
+    # PSD de los canales originales del EEG (módulo spectral_analysis)
+    # -----------------------------------------------------------------
+    psds_raw, freqs_raw, ch_names, mean_psd, std_psd, raw_psd_path = compute_and_plot_raw_psd(
+        raw, out_dir=out_dir, fmin=args.l_freq, fmax=args.h_freq, bandwidth=2.5,
+    )
+
     # =====================================================================
     # 2. EXTRACT (or LOAD CACHED) LATENT SUBSPACE FROM EEG
     # =====================================================================
@@ -438,6 +452,16 @@ def main() -> int:
     print(f"  Selected ICs       : {meta['selected_indices']}")
     print(f"  Scores             : {meta['latent_scores']}")
     print(f"  Extraction time    : {meta['elapsed_time']:.1f} s")
+
+    # -----------------------------------------------------------------
+    # PSD del espacio latente + influencia de canales sobre cada dimensión
+    # -----------------------------------------------------------------
+    psds_latent, freqs_latent, mean_latent, std_latent, latent_psd_path = compute_and_plot_latent_psd(
+        latent, sfreq=sfreq, out_dir=out_dir, fmin=args.l_freq, fmax=args.h_freq,
+    )
+    influence_weights, ch_names, fig_path, data_path = compute_channel_influence_on_latent(
+        raw, latent, meta, out_dir=out_dir, raw_psd_path=raw_psd_path,
+    )
 
     # Plot latent trajectory
     plot_latent_trajectory(

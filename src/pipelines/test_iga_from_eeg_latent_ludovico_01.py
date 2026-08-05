@@ -78,6 +78,13 @@ from src.utils.io import save_potential
 
 from src.plotters.trajectory_plots import plot_latent_trajectory
 
+# --- Módulo de análisis espectral de potencia (PSD) ---
+from src.spectral_analysis.psd_analysis import (
+    compute_and_plot_raw_psd,
+    compute_and_plot_latent_psd,
+    compute_channel_influence_on_latent,
+)
+
 from src.utils.config import (
     CONFIGS,
     BASE_RESULTS_PATH,
@@ -316,6 +323,15 @@ def main() -> int:
     print(f"  Cropped window    : {raw.times[0]:.2f} s -> {raw.times[-1]:.2f} s "
           f"(duration: {raw.times[-1] - raw.times[0]:.2f} s)")
 
+    # -----------------------------------------------------------------
+    # PSD de los canales originales (módulo spectral_analysis)
+    # l_freq/h_freq son None en este pipeline → defaults fmin=1.0,
+    # fmax=100.0 Hz (clamp automático a Nyquist si sfreq es menor).
+    # -----------------------------------------------------------------
+    psds_raw, freqs_raw, ch_names, mean_psd, std_psd, raw_psd_path = compute_and_plot_raw_psd(
+        raw, out_dir=out_dir,
+    )
+
     # =================================================================
     # 2. EXTRACT LATENT SUBSPACE
     # =================================================================
@@ -380,6 +396,17 @@ def main() -> int:
     print(f"  Selected ICs       : {meta['selected_indices']}")
     print(f"  Scores             : {meta['latent_scores']}")
     print(f"  Extraction time    : {meta['elapsed_time']:.1f} s")
+
+    # -----------------------------------------------------------------
+    # PSD del espacio latente + influencia de canales sobre cada dimensión.
+    # Sin montaje topográfico (datos CSV) → barras horizontales.
+    # -----------------------------------------------------------------
+    psds_latent, freqs_latent, mean_latent, std_latent, latent_psd_path = compute_and_plot_latent_psd(
+        latent, sfreq=sfreq, out_dir=out_dir,
+    )
+    influence_weights, ch_names, fig_path, data_path = compute_channel_influence_on_latent(
+        raw, latent, meta, out_dir=out_dir, raw_psd_path=raw_psd_path,
+    )
 
     # Plot latent trajectory
     plot_latent_trajectory(
