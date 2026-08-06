@@ -22,7 +22,9 @@ Dado un sujeto/sesión/tarea, localiza los dos cachés del pipeline
   G. PSD de todas las componentes (multitaper, con las sospechosas
      resaltadas) y segmentos de serie temporal de las sospechosas.
 
-Salidas (en ``--out-dir``, por defecto junto a los cachés):
+Salidas (en ``--out-dir``; por defecto en el árbol de resultados del
+pipeline: ``{BASE_RESULTS_PATH}/test_retest_gedai/{subject}/{session}/
+diagnostico_markov_{task}_latent_dim_{D}_{stage1}+{stage2}``):
   - ``diagnostico_reporte.txt``
   - ``diagnostico_valores_singulares.png``
   - ``diagnostico_tau_matriz.png``
@@ -36,10 +38,11 @@ Uso (desde la raíz del repositorio)::
         --subject sub-01 --session session1 --task eyesclosed \
         --t-start 0 --t-end 300
 
-Las rutas por defecto se toman de ``src.utils.config`` (BASE_CACHE_PATH),
-igual que hacen el batch y el pipeline; se pueden sobreescribir con
-``--cache-root`` / ``--out-dir``. NO modifica ningún fichero del pipeline:
-solo lee los cachés y escribe en el directorio de diagnóstico.
+Las rutas por defecto se toman de ``src.utils.config`` (BASE_CACHE_PATH
+para los cachés de entrada y BASE_RESULTS_PATH para la salida), igual que
+hacen el batch y el pipeline; se pueden sobreescribir con ``--cache-root``,
+``--results-root`` y ``--out-dir``. NO modifica ningún fichero del
+pipeline: solo lee los cachés y escribe en el directorio de diagnóstico.
 """
 
 from __future__ import annotations
@@ -75,18 +78,26 @@ def _bootstrap_project_paths() -> None:
         sys.path.insert(0, str(Path.cwd()))
 
 
-def _load_cache_root(cli_cache_root: str | None) -> Path:
-    """Raíz de caché: --cache-root o BASE_CACHE_PATH de src.utils.config."""
-    if cli_cache_root:
-        return Path(cli_cache_root)
+def _load_config_paths(
+    cli_cache_root: str | None,
+    cli_results_root: str | None,
+) -> tuple[Path | None, Path | None]:
+    """Raíces de caché y de resultados.
+
+    Por defecto se importan ``BASE_CACHE_PATH`` y ``BASE_RESULTS_PATH`` de
+    ``src.utils.config`` (las mismas variables que usan el batch y el
+    pipeline); ``--cache-root`` / ``--results-root`` las sobreescriben.
+    Devuelve ``(cache_root, results_root)``, ``None`` si no se pudo resolver.
+    """
+    base_cache = base_results = None
     try:
-        from src.utils.config import BASE_CACHE_PATH  # type: ignore
-        return Path(BASE_CACHE_PATH)
-    except Exception as exc:
-        sys.exit(
-            "[ERROR] No se pudo importar BASE_CACHE_PATH desde src.utils.config "
-            f"({exc}). Ejecuta desde la raíz del repo o pasa --cache-root."
-        )
+        from src.utils.config import BASE_CACHE_PATH, BASE_RESULTS_PATH  # type: ignore
+        base_cache, base_results = Path(BASE_CACHE_PATH), Path(BASE_RESULTS_PATH)
+    except Exception:
+        pass
+    cache_root = Path(cli_cache_root) if cli_cache_root else base_cache
+    results_root = Path(cli_results_root) if cli_results_root else base_results
+    return cache_root, results_root
 
 
 def _import_markov_helpers():
@@ -451,8 +462,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--stage2", default="pca_ica")
     p.add_argument("--cache-root", default=None,
                    help="raíz de caché (por defecto BASE_CACHE_PATH de src.utils.config)")
+    p.add_argument("--results-root", default=None,
+                   help="raíz de resultados (por defecto BASE_RESULTS_PATH de "
+                        "src.utils.config); base del directorio de salida")
     p.add_argument("--out-dir", default=None,
-                   help="directorio de salida del diagnóstico")
+                   help="directorio de salida exacto (sobreescribe --results-root)")
     p.add_argument("--n-workers", type=int, default=None,
                    help="procesos para la matriz τ (None = todos los cores, 1 = serie)")
     p.add_argument("--n-bins-stability", default="5,10,15",
@@ -463,7 +477,12 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     _bootstrap_project_paths()
-    cache_root = _load_cache_root(args.cache_root)
+    cache_root, results_root = _load_config_paths(args.cache_root, args.results_root)
+    if cache_root is None:
+        sys.exit(
+            "[ERROR] No se pudo importar BASE_CACHE_PATH desde src.utils.config. "
+            "Ejecuta desde la raíz del repo o pasa --cache-root."
+        )
     discretize_series, evaluate_markov_combination, _evaluate_markov_worker = \
         _import_markov_helpers()
 
@@ -475,6 +494,7 @@ def main() -> int:
     print("=" * 72)
     print(f"  Sujeto/sesión/tarea: {args.subject} / {args.session} / {args.task}")
     print(f"  Raíz de caché      : {cache_root}")
+    print(f"  Raíz de resultados : {results_root}")
 
     npz_fast = _find_cache_npz(cache_root, args.subject, args.session, args.task,
                                args.latent_dim, chain_fast, args.t_start, args.t_end)
@@ -486,8 +506,21 @@ def main() -> int:
     latent_f, meta_f = _load_cache(npz_fast)
     latent_s, meta_s = _load_cache(npz_slow)
 
-    out_dir = Path(args.out_dir) if args.out_dir else (
-        npz_fast.parent / f"diagnostico_markov_vs_{chain_slow}")
+    if args.out_dir:
+        out_dir = Path(args.out_dir)
+    else:
+        if results_root is None:
+            sys.exit(
+                "[ERROR] No se pudo importar BASE_RESULTS_PATH desde "
+                "src.utils.config. Ejecuta desde la raíz del repo, o pasa "
+                "--results-root / --out-dir."
+            )
+        out_dir = (
+            results_root
+            / "test_retest_gedai" / args.subject / args.session
+            / f"diagnostico_markov_{args.task}_latent_dim_{args.latent_dim}"
+              f"_{args.stage1}+{args.stage2}"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"  Salida     : {out_dir}")
 
