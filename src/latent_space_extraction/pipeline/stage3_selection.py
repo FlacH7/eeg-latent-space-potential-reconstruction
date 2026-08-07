@@ -164,13 +164,20 @@ class MarkovSelection:
                 Y, n_dim, n_bins=self.n_bins, maximize=self.maximize,
             )
             comb = tuple(comb)
+            all_taus = []  # No disponible en greedy por ahora
         else:
-            comb, tau = find_best_subspace_markov(
+            result = find_best_subspace_markov(
                 Y, n_dim,
                 n_bins=self.n_bins,
                 n_workers=ctx.n_workers,
                 maximize=self.maximize,
+                return_all_taus=True,
             )
+            comb, tau, all_taus = result
+            comb = tuple(comb)
+            # Normalizar all_taus a lista de (tuple, float)
+            all_taus = [(tuple(c), float(t)) for c, t in all_taus]
+
         if comb is None:
             raise RuntimeError(
                 "[Stage3/markov] No valid (ergodic) subspace found: every "
@@ -189,6 +196,7 @@ class MarkovSelection:
                 "search": "greedy" if use_greedy else "exhaustive",
                 "maximize": self.maximize,
             },
+            "all_markov_taus": all_taus,  # NUEVO: lista de (comb, tau)
             "elapsed_time": time.time() - t0,
         }
         return out, meta

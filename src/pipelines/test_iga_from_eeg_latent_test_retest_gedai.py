@@ -97,6 +97,40 @@ from src.utils.config import (
     DB_TEST_RETEST_GEDAI_PATH,
 )
 
+# --- NUEVOS IMPORTS: modulo de ploteo del pipeline (src.plotters) ---
+from src.plotters import (
+    # Stage 0
+    plot_channel_topographies,
+    plot_channel_correlation_matrix,
+    # Stage 1
+    plot_hankel_singular_values,
+    plot_hankel_variance_explained,
+    # Stage 2
+    plot_pca_variance_explained,
+    plot_pre_ica_component_psds,
+    plot_icalabel_summary,
+    plot_post_ica_component_psds,
+    plot_hankel_pca_singular_values,
+    plot_fastica_convergence,
+    plot_dmd_eigenvalue_unit_circle,
+    plot_dmd_frequency_damping,
+    plot_diffusion_eigenvalue_spectrum,
+    plot_diffusion_kernel_diagnostics,
+    plot_diffusion_2d_components,
+    # Stage 3
+    plot_markov_tau_heatmap,
+    plot_markov_tau_ranked,
+    plot_markov_selection_vs_distribution,
+    plot_markov_transition_matrix,
+    # Latent detail
+    plot_latent_timeseries_zoom,
+    # Pipeline overview
+    plot_pipeline_energy_budget,
+    plot_pipeline_flowchart,
+    # Style setup
+    setup_plotting_style,
+)
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -390,6 +424,23 @@ def main() -> int:
         raw, out_dir=out_dir, fmin=args.l_freq, fmax=args.h_freq, bandwidth=2.5,
     )
 
+    # --- STAGE 0: EXPLORATORY PLOTS ---
+    print("  Generando plots exploratorios (Stage 0)...")
+    try:
+        setup_plotting_style()
+        plot_channel_topographies(
+            raw, out_dir=out_dir,
+            fmin=args.l_freq, fmax=args.h_freq,
+            subject=args.subject, session=args.session, task=args.task,
+        )
+        plot_channel_correlation_matrix(
+            raw, out_dir=out_dir,
+            subject=args.subject, session=args.session, task=args.task,
+        )
+        print("  [OK] Plots exploratorios guardados.")
+    except Exception as e:
+        print(f"  [WARN] Error en plots exploratorios: {e}")
+
     # =====================================================================
     # 2. EXTRACT (or LOAD CACHED) LATENT SUBSPACE FROM EEG
     # =====================================================================
@@ -452,6 +503,104 @@ def main() -> int:
     print(f"  Selected ICs       : {meta['selected_indices']}")
     print(f"  Scores             : {meta['latent_scores']}")
     print(f"  Extraction time    : {meta['elapsed_time']:.1f} s")
+
+    # -----------------------------------------------------------------
+    # STAGE 1: HANKEL EMBEDDING PLOTS
+    # -----------------------------------------------------------------
+    if spec["stage1_embedding"] == "hankel":
+        print("  Generando plots Stage 1 (Hankel)...")
+        try:
+            from src.latent_space_extraction.hankel_dmd_extractor import (
+                _build_multivariate_hankel,
+            )
+            depth = meta["stage1"].get("depth")
+            X_input = meta["stage1"].get("input_data")
+            if X_input is not None and depth is not None:
+                H_plot = _build_multivariate_hankel(X_input, depth)
+                plot_hankel_singular_values(
+                    H_plot, out_dir=out_dir, embedding_depth=depth,
+                )
+                plot_hankel_variance_explained(
+                    H_plot, out_dir=out_dir, embedding_depth=depth,
+                )
+                print("  [OK] Plots Stage 1 guardados.")
+        except Exception as e:
+            print(f"  [WARN] Error en plots Stage 1: {e}")
+
+    # -----------------------------------------------------------------
+    # STAGE 2: DYNAMICS PLOTS
+    # -----------------------------------------------------------------
+    print("  Generando plots de dinamica (Stage 2)...")
+    try:
+        stage2_meta = meta["stage2"]
+        # PCA variance (para pca_ica rama MNE)
+        plot_pca_variance_explained(stage2_meta, out_dir=out_dir)
+        # ICLabel summary
+        plot_icalabel_summary(stage2_meta, out_dir=out_dir)
+        # Pre/post ICA PSDs (solo para rama MNE)
+        plot_pre_ica_component_psds(
+            raw, stage2_meta, out_dir=out_dir,
+            fmin=args.l_freq, fmax=args.h_freq,
+        )
+        plot_post_ica_component_psds(
+            stage2_meta, sfreq=sfreq, out_dir=out_dir,
+            fmin=args.l_freq, fmax=args.h_freq,
+        )
+        # Hankel PCA singular values (solo para pca_ica rama Hankel)
+        plot_hankel_pca_singular_values(stage2_meta, out_dir=out_dir)
+        # FastICA convergence
+        plot_fastica_convergence(stage2_meta, out_dir=out_dir)
+        # DMD
+        plot_dmd_eigenvalue_unit_circle(stage2_meta, out_dir=out_dir)
+        plot_dmd_frequency_damping(stage2_meta, out_dir=out_dir)
+        # Diffusion Maps
+        plot_diffusion_eigenvalue_spectrum(stage2_meta, out_dir=out_dir)
+        # Kernel diagnostics (puede ser costoso; best-effort)
+        try:
+            dm_input = stage2_meta.get("dm_input_data")
+            if dm_input is None and spec["stage1_embedding"] == "hankel":
+                dm_input = meta["stage1"].get("input_data")
+            plot_diffusion_kernel_diagnostics(stage2_meta, dm_input, out_dir=out_dir)
+        except Exception as e:
+            print(f"  [WARN] Kernel diagnostics omitido: {e}")
+        plot_diffusion_2d_components(meta, out_dir=out_dir)
+        print("  [OK] Plots Stage 2 guardados.")
+    except Exception as e:
+        print(f"  [WARN] Error en plots Stage 2: {e}")
+
+    # -----------------------------------------------------------------
+    # STAGE 3: MARKOV SELECTION PLOTS
+    # -----------------------------------------------------------------
+    if "all_markov_taus" in meta.get("stage3", {}):
+        all_taus = meta["stage3"]["all_markov_taus"]
+        selected = tuple(meta["selected_indices"])
+        try:
+            plot_markov_tau_heatmap(all_taus, out_dir=out_dir,
+                                    selected_combination=selected)
+            plot_markov_tau_ranked(all_taus, out_dir=out_dir,
+                                   selected_combination=selected)
+            tau_sel = meta["stage3"]["scores"].get("tau")
+            if tau_sel is not None and selected:
+                maximize = meta["stage3"]["scores"].get("maximize", False)
+                plot_markov_selection_vs_distribution(
+                    all_taus, tau_sel, selected,
+                    maximize=maximize, out_dir=out_dir,
+                )
+            print("  [OK] Plots Stage 3 (Markov) guardados.")
+        except Exception as e:
+            print(f"  [WARN] Error en plots Stage 3: {e}")
+
+    # Matriz de transicion de la combinacion seleccionada (siempre disponible
+    # cuando se uso markov)
+    if "markov" in spec["stage3_selection"]:
+        try:
+            Y2 = meta["Y"]   # (D, T)
+            n_bins_s3 = meta["stage3"]["scores"].get("n_bins", 10)
+            selected = tuple(meta["selected_indices"])
+            plot_markov_transition_matrix(Y2, selected, n_bins_s3, out_dir=out_dir)
+            print("  [OK] Matriz de transicion guardada.")
+        except Exception as e:
+            print(f"  [WARN] Error en plot de matriz de transicion: {e}")
 
     # -----------------------------------------------------------------
     # PSD del espacio latente + influencia de canales sobre cada dimensión
@@ -523,6 +672,13 @@ def main() -> int:
     fig_ts.savefig(out_dir / "latent_timeseries.png", dpi=150)
     plt.close(fig_ts)
     print(f"  Saved latent_timeseries.png")
+
+    # --- LATENT DETAIL: ZOOM ---
+    try:
+        plot_latent_timeseries_zoom(latent, sfreq=sfreq, out_dir=out_dir)
+        print("  Saved latent_timeseries_zoom.png")
+    except Exception as e:
+        print(f"  [WARN] Error en plot de zoom latente: {e}")
 
     data = outliers_cleaning(data, method="iqr", threshold=5)
 
@@ -856,6 +1012,22 @@ def main() -> int:
     # =====================================================================
     # 12. SUMMARY
     # =====================================================================
+    # --- PIPELINE OVERVIEW (cross-stage plots) ---
+    try:
+        plot_pipeline_energy_budget(
+            X_filtered=meta.get("preprocessing", {}).get("X_filtered"),
+            meta=meta, latent=latent, out_dir=out_dir,
+        )
+        print("  Saved pipeline_energy_budget.png")
+        plot_pipeline_flowchart(
+            meta=meta, out_dir=out_dir,
+            l_freq=args.l_freq, h_freq=args.h_freq,
+            n_channels=len(raw.ch_names), sfreq=sfreq,
+        )
+        print("  Saved pipeline_flowchart.png")
+    except Exception as e:
+        print(f"  [WARN] Error en plots overview: {e}")
+
     total_time = time.time() - overall_t0
     print("\n" + "=" * 70)
     print("  PIPELINE COMPLETED SUCCESSFULLY")
