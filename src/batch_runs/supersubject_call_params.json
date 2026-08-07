@@ -23,7 +23,7 @@
     {
       "label": "hankel+pca_ica+markov_fastest",
       "stage1_embedding": "hankel",
-      "stage1_params": {},
+      "stage1_params": {"depth": 60},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
         "ica_method": "picard",
