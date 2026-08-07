@@ -1,25 +1,29 @@
 {
-  "pipeline_module": "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai",
+  "pipeline_module": "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai_super_subject",
 
-  "subjects": {
-    "start": 1,
-    "end": 5
+  "super_subjects": {
+    "selected": [1, 2, 3],
+    "subjects_per_super_subject": 20,
+    "subject_start_offset": 1,
+    "total_subjects": 60,
+    "_comment_groups": "Opcional: si se define 'groups', toma precedencia sobre la auto-resolucion. Las claves pueden ser enteros o strings; los valores son listas de indices de sujetos. Ejemplo: \"groups\": {\"1\": [1,2,...,20], \"2\": [21,...,40], \"3\": [41,...,60]}"
   },
 
   "sessions": ["session1"],
 
-  "tasks": ["eyesclosed"],
+  "tasks": ["eyesclosed", "eyesopen","music"],
 
   "time_window": {
     "t_start": 0.0,
-    "t_end": 300.0
+    "t_end": 300.0,
+    "_comment": "Ventana temporal aplicada POR SUJETO antes de concatenar. Cada super-sujeto queda con N_subjects * (t_end - t_start) segundos."
   },
 
   "methods": [
     {
       "label": "hankel+pca_ica+markov_fastest",
       "stage1_embedding": "hankel",
-      "stage1_params": {},
+      "stage1_params": {"depth": 60},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
         "ica_method": "picard",
@@ -58,7 +62,7 @@
     "save_potential": true,
     "no_save_potential": false,
     "verbose": true,
-    "ignore_cache": false,
+    "ignore_c35439ache": false,
     "hankel_embedding_depth": null,
     "diffusion_sigma": null,
     "diffusion_k": 100,
@@ -68,7 +72,7 @@
     "n_bins": 10,
     "workers": null,
     "search_strategy": "exhaustive",
-    "km_bins":40
+    "km_bins": 40
   },
 
   "execution": {

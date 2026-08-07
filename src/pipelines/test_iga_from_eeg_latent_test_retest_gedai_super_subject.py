@@ -1,33 +1,53 @@
 #!/usr/bin/env python3
 """
-test_iga_from_eeg_latent_test_retest_gedai.py
-=============================================
-Pipeline de Kramers-Moyal + IgA reconstruction para EEG del dataset
-test-retest preprocesado con **Gedai** (formato EEGLAB .set/.fdt).
+test_iga_from_eeg_latent_test_retest_gedai_super_subject.py
+============================================================
+Pipeline IgA (Kramers-Moyal + reconstruction via Galerkin-B-spline) for
+**super-subject** EEG recordings from the test-retest Gedai dataset
+(EEGLAB ``.set``/``.fdt``).
 
-Carga un segmento de EEG via ``load_test_retest_gedai_eeg_from_ids``,
-extrae el espacio latente con el **pipeline modular de 3 etapas**
-(Embedding → Dinámica → Selección), y aplica el estimador Kramers-Moyal y
-la reconstruccion de potencial via Galerkin-B-spline (IgA).
+A super-subject is the time-axis concatenation of *N* individual
+subjects' EEG recordings sharing the same ``session`` and ``task``.
+The concatenated raw is processed **as if it were a single subject's
+recording from the start** -- i.e. the full IgA pipeline (Stage 0
+load -> 3-stage latent extraction -> KM -> IgA potential reconstruction)
+runs once on the concatenated raw, with no per-subject boundary
+information leaking downstream.
 
-Los argumentos legacy (``--scoring-method markov|hankel_dmd|...``) siguen
-funcionando: se mapean internamente a la nueva API de etapas.  Tambien se
-pueden pasar las etapas directamente con ``--stage1-embedding``,
-``--stage2-dynamics`` y ``--stage3-selection``.
+This is a sibling of
+``test_iga_from_eeg_latent_test_retest_gedai.py`` and shares its
+CLI/stage API; the only differences are:
 
-Usage::
+* ``--subject`` is replaced by ``--super-subject`` (1-indexed int).
+* ``--subject-ids`` (JSON list) optionally overrides the auto-resolved
+  subject pool.  Otherwise the pool is built from
+  ``--subjects-per-super-subject`` and ``--subject-start-offset``.
+* Output directory:
+  ``test_retest_gedai_super_subject/super_subject-{id}/{session}/
+   {latent_dim}_latent_dim_{spec_label}_{spec_hash}/
+   from{t_start}s_to_{t_end}s_{task}``
+* Cache directory:
+  ``cache_eeg_test_retest_gedai_super_subject/super_subject-{id}/
+   {session}/task_{task}_latent_dim_{latent_dim}_{spec_label}_{spec_hash}/
+   from{t_start}s_to_{t_end}s.npz``
 
-    # Legacy (mapeado a stage1='hankel', stage2='dmd', stage3='top_n')
-    python test_iga_from_eeg_latent_test_retest_gedai.py --subject sub-01 \\
-        --session session1 --task eyesclosed --t-start 0 --t-end 60 \\
-        --scoring-method hankel_dmd
+Usage
+-----
+From the project root::
 
-    # Nueva API: NLSA (Hankel + Diffusion Maps + top-n)
-    python test_iga_from_eeg_latent_test_retest_gedai.py --subject sub-01 \\
-        --session session1 --task eyesclosed \\
-        --stage1-embedding hankel --stage1-params '{"depth": 250}' \\
-        --stage2-dynamics diffusion_maps \\
-        --stage2-params '{"svd_rank": 50, "k": 100}' \\
+    # Auto-resolve subject pool: super_subject 1 = subjects 1..20
+    python -m src.pipelines.test_iga_from_eeg_latent_test_retest_gedai_super_subject \\
+        --super-subject 1 --session session1 --task eyesclosed \\
+        --t-start 0 --t-end 300 \\
+        --stage1-embedding hankel --stage2-dynamics dmd \\
+        --stage3-selection top_n
+
+    # Explicit subject list (non-contiguous partition)
+    python -m src.pipelines.test_iga_from_eeg_latent_test_retest_gedai_super_subject \\
+        --super-subject 2 --session session1 --task eyesclosed \\
+        --subject-ids '[21,22,23,...,40]' \\
+        --t-start 0 --t-end 300 \\
+        --stage1-embedding hankel --stage2-dynamics dmd \\
         --stage3-selection top_n
 """
 
@@ -53,7 +73,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.latent_space_extraction.extract_latent_subspace import (
     extract_latent_space,
@@ -73,7 +93,7 @@ from src.potential_reconstruction.km_tools_v2 import (
 )
 from src.potential_reconstruction.bw_optimization import optimal_bw
 
-from src.latent_space_extraction.test_retest_gedai_eeg import load_test_retest_gedai_eeg_from_ids
+from src.latent_space_extraction.super_subject_eeg import load_super_subject_eeg
 
 from src.latent_space_extraction.data_analysis_tools import outliers_cleaning
 
@@ -83,7 +103,7 @@ from src.utils.io import save_potential
 
 from src.plotters.trajectory_plots import plot_latent_trajectory
 
-# --- Módulo de análisis espectral de potencia (PSD) ---
+# --- Power-spectral-density analysis module ---
 from src.spectral_analysis.psd_analysis import (
     compute_and_plot_raw_psd,
     compute_and_plot_latent_psd,
@@ -97,7 +117,7 @@ from src.utils.config import (
     DB_TEST_RETEST_GEDAI_PATH,
 )
 
-# --- NUEVOS IMPORTS: modulo de ploteo del pipeline (src.plotters) ---
+# --- Plotting module (src.plotters) ---
 from src.plotters import (
     # Stage 0
     plot_channel_topographies,
@@ -131,116 +151,194 @@ from src.plotters import (
     setup_plotting_style,
 )
 
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="KM + IgA pipeline from test-retest EEG preprocessed with Gedai (EEGLAB .set/.fdt)",
+        description=(
+            "KM + IgA pipeline for SUPER-SUBJECT test-retest EEG "
+            "(concatenation of N subjects) preprocessed with Gedai "
+            "(EEGLAB .set/.fdt)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    # ---- EEG source ----
-    parser.add_argument("--subject", type=str, required=True,
-                        help="Subject ID (e.g. sub-01)")
-    parser.add_argument("--session", type=str, required=True,
-                        help="Session ID (e.g. session1)")
-    parser.add_argument("--task", type=str, required=True,
-                        help="Task label (eyesclosed, eyesopen, mathematic, memory, music)")
-    parser.add_argument("--db-path", type=str, default=None,
-                        help="Override Gedai dataset root path")
-    parser.add_argument("--t-start", type=float, default=None,
-                        help="Start time (s) for EEG segment to analyze.")
-    parser.add_argument("--t-end", type=float, default=None,
-                        help="End time (s) for EEG segment to analyze.")
+    # ---- Super-subject source ----
+    parser.add_argument(
+        "--super-subject", type=int, required=True,
+        help="1-indexed super-subject identifier (1, 2, 3, ...).",
+    )
+    parser.add_argument(
+        "--subject-ids", type=str, default=None,
+        help=(
+            "JSON list of subject indices that compose the super-subject, "
+            'e.g. \'[1,2,...,20]\'. When omitted, the pool is built from '
+            "--subjects-per-super-subject and --subject-start-offset."
+        ),
+    )
+    parser.add_argument(
+        "--subjects-per-super-subject", type=int, default=20,
+        help="Subjects per super-subject (auto-resolution). Default: 20.",
+    )
+    parser.add_argument(
+        "--subject-start-offset", type=int, default=1,
+        help=(
+            "Index of the first subject in the dataset (typically 1 for "
+            "sub-01). Used by auto-resolution. Default: 1."
+        ),
+    )
+    # ---- Session / task ----
+    parser.add_argument(
+        "--session", type=str, required=True,
+        help="Session ID (e.g. session1)",
+    )
+    parser.add_argument(
+        "--task", type=str, required=True,
+        help="Task label (eyesclosed, eyesopen, mathematic, memory, music)",
+    )
+    parser.add_argument(
+        "--db-path", type=str, default=None,
+        help="Override Gedai dataset root path",
+    )
+    parser.add_argument(
+        "--t-start", type=float, default=None,
+        help="Per-subject start time (s) of the EEG segment to analyze.",
+    )
+    parser.add_argument(
+        "--t-end", type=float, default=None,
+        help="Per-subject end time (s) of the EEG segment to analyze.",
+    )
     # ---- Cache / persistence ----
-    parser.add_argument("--cache-file", type=str, default=None,
-                        help="Path to cache file for the latent space.")
-    parser.add_argument("--ignore-cache", action="store_true",
-                        help="Ignore an existing cache file and force recomputation.")
+    parser.add_argument(
+        "--cache-file", type=str, default=None,
+        help="Path to cache file for the latent space.",
+    )
+    parser.add_argument(
+        "--ignore-cache", action="store_true",
+        help="Ignore an existing cache file and force recomputation.",
+    )
     # ---- Latent-space extraction params ----
-    parser.add_argument("--latent-dim", type=int, default=2,
-                        help="Dimensionality of the latent subspace (default: 2)")
+    parser.add_argument(
+        "--latent-dim", type=int, default=2,
+        help="Dimensionality of the latent subspace (default: 2)",
+    )
     # ---- NEW 3-stage pipeline API ----
-    parser.add_argument("--stage1-embedding", type=str, default=None,
-                        choices=["none", "hankel"],
-                        help="Stage 1 embedding. If omitted, the legacy "
-                             "--scoring-method mapping is used.")
-    parser.add_argument("--stage1-params", type=str, default=None,
-                        help='JSON dict of Stage-1 params, e.g. \'{"depth": 250}\'')
-    parser.add_argument("--stage2-dynamics", type=str, default=None,
-                        choices=["pca_ica", "pca", "dmd", "diffusion_maps"],
-                        help="Stage 2 dynamics (new API).")
-    parser.add_argument("--stage2-params", type=str, default=None,
-                        help='JSON dict of Stage-2 params, e.g. \'{"svd_rank": 50}\'')
-    parser.add_argument("--stage3-selection", type=str, default=None,
-                        choices=["top_n", "markov_fastest", "markov_slowest"],
-                        help="Stage 3 selection (new API).")
-    parser.add_argument("--stage3-params", type=str, default=None,
-                        help='JSON dict of Stage-3 params, e.g. \'{"n_bins": 10}\'')
+    parser.add_argument(
+        "--stage1-embedding", type=str, default=None,
+        choices=["none", "hankel"],
+        help="Stage 1 embedding. If omitted, the legacy "
+             "--scoring-method mapping is used.",
+    )
+    parser.add_argument(
+        "--stage1-params", type=str, default=None,
+        help='JSON dict of Stage-1 params, e.g. \'{"depth": 250}\'',
+    )
+    parser.add_argument(
+        "--stage2-dynamics", type=str, default=None,
+        choices=["pca_ica", "pca", "dmd", "diffusion_maps"],
+        help="Stage 2 dynamics (new API).",
+    )
+    parser.add_argument(
+        "--stage2-params", type=str, default=None,
+        help='JSON dict of Stage-2 params, e.g. \'{"svd_rank": 50}\'',
+    )
+    parser.add_argument(
+        "--stage3-selection", type=str, default=None,
+        choices=["top_n", "markov_fastest", "markov_slowest"],
+        help="Stage 3 selection (new API).",
+    )
+    parser.add_argument(
+        "--stage3-params", type=str, default=None,
+        help='JSON dict of Stage-3 params, e.g. \'{"n_bins": 10}\'',
+    )
     # ---- Legacy scoring API (mapped onto the new stages) ----
-    parser.add_argument("--scoring-method", type=str, default="hankel_dmd",
-                        choices=["markov", "markov_inverted", "conservative", "weighted",
-                                 "sequential", "pareto", "independent",
-                                 "hankel_dmd", "diffusion_maps"],
-                        help="Legacy subspace selection strategy (default: hankel_dmd). "
-                             "Mapped internally onto the new 3-stage API. Ignored if "
-                             "any --stageX argument is given.")
-    parser.add_argument("--fc-metric", type=str, default="variance_sum",
-                        choices=["variance_sum", "first_pc_var", "total_variance"])
-    parser.add_argument("--n-bins", type=int, default=10,
-                        help="Quantile bins for Markov discretisation (default: 10)")
-    parser.add_argument("--workers", type=int, default=None,
-                        help="Number of parallel processes for subspace search")
-    parser.add_argument("--search-strategy", type=str, default="exhaustive",
-                        choices=["exhaustive", "greedy"])
+    parser.add_argument(
+        "--scoring-method", type=str, default="hankel_dmd",
+        choices=["markov", "markov_inverted", "conservative", "weighted",
+                 "sequential", "pareto", "independent",
+                 "hankel_dmd", "diffusion_maps"],
+        help="Legacy subspace selection strategy (default: hankel_dmd). "
+             "Mapped internally onto the new 3-stage API. Ignored if "
+             "any --stageX argument is given.",
+    )
+    parser.add_argument(
+        "--fc-metric", type=str, default="variance_sum",
+        choices=["variance_sum", "first_pc_var", "total_variance"],
+    )
+    parser.add_argument(
+        "--n-bins", type=int, default=10,
+        help="Quantile bins for Markov discretisation (default: 10)",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Number of parallel processes for subspace search",
+    )
+    parser.add_argument(
+        "--search-strategy", type=str, default="exhaustive",
+        choices=["exhaustive", "greedy"],
+    )
     # ---- Which latent dimension(s) to feed into KM ----
-    parser.add_argument("--analysis-dim", type=int, default=None,
-                        help="Number of latent dimensions to use for KM. "
-                             "If None, uses all extracted dimensions.")
-    parser.add_argument("--column", type=int, default=None,
-                        help="If analysis-dim=1, which latent column to use (0=first).")
+    parser.add_argument(
+        "--analysis-dim", type=int, default=None,
+        help="Number of latent dimensions to use for KM. "
+             "If None, uses all extracted dimensions.",
+    )
+    parser.add_argument(
+        "--column", type=int, default=None,
+        help="If analysis-dim=1, which latent column to use (0=first).",
+    )
     # ---- Preprocessing params ----
     parser.add_argument("--l-freq", type=float, default=1.0)
     parser.add_argument("--h-freq", type=float, default=40.0)
     parser.add_argument("--ica-method", type=str, default="picard")
     parser.add_argument("--verbose", action="store_true", default=True)
     # ---- Hankel (legacy convenience; also usable as stage1 param) ----
-    parser.add_argument("--hankel-embedding-depth", type=int, default=None,
-                        help="Hankel embedding depth T. None = auto "
-                             "(clip(sfreq*0.25, 50, 200)).")
+    parser.add_argument(
+        "--hankel-embedding-depth", type=int, default=None,
+        help="Hankel embedding depth T. None = auto "
+             "(clip(sfreq*0.25, 50, 200)).",
+    )
     # ---- Diffusion Maps params ----
     parser.add_argument(
         "--diffusion-sigma", type=float, default=None,
         help=("Sigma for Diffusion Maps Gaussian kernel. "
-              "If None, auto-computed via bgh method (Berry-Giannakis-Harlim).")
+              "If None, auto-computed via bgh method (Berry-Giannakis-Harlim)."),
     )
     parser.add_argument(
         "--diffusion-k", type=int, default=100,
-        help="Number of nearest neighbors for sparse affinity matrix."
+        help="Number of nearest neighbors for sparse affinity matrix.",
     )
     parser.add_argument(
         "--diffusion-time", type=float, default=0.0,
         help=("Diffusion time t >= 0. Higher values filter fine-scale noise "
-              "and highlight macroscopic dynamics (multiscale filtering).")
+              "and highlight macroscopic dynamics (multiscale filtering)."),
     )
     parser.add_argument(
         "--diffusion-alpha", type=float, default=0.5,
         help=("Density normalization parameter (Coifman-Lafon). "
-              "0.0=Laplacian Eigenmaps, 0.5=Diffusion Maps (default), 1.0=Fokker-Planck.")
+              "0.0=Laplacian Eigenmaps, 0.5=Diffusion Maps (default), 1.0=Fokker-Planck."),
     )
     # ---- Output ----
-    parser.add_argument("--out-dir", type=str, default=None,
-                        help="Directory to save plots (default: current)")
-        # ---- Kramers-Moyal bins ----
-    parser.add_argument("--km-bins", type=int, default=40,
-                        help="Number of bins per dimension for KM estimation (default: 40)")
+    parser.add_argument(
+        "--out-dir", type=str, default=None,
+        help="Directory to save plots (default: current)",
+    )
+    # ---- Kramers-Moyal bins ----
+    parser.add_argument(
+        "--km-bins", type=int, default=40,
+        help="Number of bins per dimension for KM estimation (default: 40)",
+    )
     # ---- Save potential ----
-    parser.add_argument("--save-potential", action="store_true", default=True,
-                        help="Guardar datos del potencial en .npz para post-procesamiento")
-    parser.add_argument("--no-save-potential", action="store_true",
-                        help="Deshabilitar el guardado del potencial")
+    parser.add_argument(
+        "--save-potential", action="store_true", default=True,
+        help="Guardar datos del potencial en .npz para post-procesamiento",
+    )
+    parser.add_argument(
+        "--no-save-potential", action="store_true",
+        help="Deshabilitar el guardado del potencial",
+    )
 
     return parser.parse_args()
 
@@ -248,7 +346,6 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Pipeline-spec resolution: new stage API or legacy scoring-method mapping
 # ---------------------------------------------------------------------------
-
 
 def _json_params(raw: str | None) -> dict:
     """Parse a JSON params dict from the CLI (empty dict when omitted)."""
@@ -260,15 +357,25 @@ def _json_params(raw: str | None) -> dict:
     return parsed
 
 
+def _json_int_list(raw: str | None) -> list[int] | None:
+    """Parse a JSON list of integers from the CLI (None when omitted)."""
+    if raw is None:
+        return None
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list) or not all(isinstance(x, int) for x in parsed):
+        raise ValueError(f"subject-ids must be a JSON list of ints, got: {raw!r}")
+    return parsed
+
+
 def _resolve_pipeline_spec(args: argparse.Namespace) -> dict:
     """
     Resolve the effective 3-stage specification.
 
-    * If any ``--stageX`` argument is given → new API (missing stages take
+    * If any ``--stageX`` argument is given -> new API (missing stages take
       their defaults; CLI convenience flags --diffusion-* /
       --hankel-embedding-depth / --n-bins are injected into the JSON
       params when not already present).
-    * Otherwise → legacy ``--scoring-method`` mapping via
+    * Otherwise -> legacy ``--scoring-method`` mapping via
       :func:`map_legacy_scoring_method`.
 
     Returns a dict with keys ``stage1_embedding``, ``stage1_params``,
@@ -348,9 +455,17 @@ def _spec_hash(spec: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main pipeline
+# Super-subject label helpers
 # ---------------------------------------------------------------------------
 
+def _super_subject_label(super_subject_id: int) -> str:
+    """BIDS-style label for the super-subject, e.g. ``super_subject-01``."""
+    return f"super_subject-{super_subject_id:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     args = _parse_args()
@@ -375,12 +490,28 @@ def main() -> int:
     print(f"\n  Pipeline spec : {spec_label}  (hash {spec_hash})")
     print(f"  Stage params  : {json.dumps(spec, default=str)}")
 
+    # Resolve subject pool for the super-subject
+    subject_ids = _json_int_list(args.subject_ids)
+    ss_label = _super_subject_label(args.super_subject)
+    print(f"  Super-subject : {ss_label}")
+    if subject_ids is not None:
+        print(f"  Subject pool  : explicit list ({len(subject_ids)} subjects)")
+    else:
+        print(
+            f"  Subject pool  : auto-resolved "
+            f"({args.subjects_per_super_subject} subjects starting at "
+            f"{args.subject_start_offset})"
+        )
+
     # -----------------------------------------------------------------
-    # Output directory: test_retest_gedai/<subject>/<session>/<task>/from{t_start}_to_{t_end}
+    # Output directory:
+    # test_retest_gedai_super_subject/super_subject-{id}/{session}/
+    #   {latent_dim}_latent_dim_{spec_label}_{spec_hash}/
+    #   from{t_start}s_to_{t_end}s_{task}
     # -----------------------------------------------------------------
     out_dir = Path(
-        args.out_dir
-        + f"/test_retest_gedai/{args.subject}/{args.session}"
+        str(args.out_dir)
+        + f"/test_retest_gedai_super_subject/{ss_label}/{args.session}"
         + f"/{args.latent_dim}_latent_dim_{spec_label}_{spec_hash}"
         + f"/from{args.t_start}s_to_{args.t_end}s_{args.task}"
     )
@@ -389,17 +520,20 @@ def main() -> int:
     overall_t0 = time.time()
 
     # =====================================================================
-    # 1. LOAD EEG SEGMENT
+    # 1. LOAD SUPER-SUBJECT EEG SEGMENT (concatenated raw)
     # =====================================================================
     print("=" * 70)
-    print("  STAGE 0: LOAD TEST-RETEST EEG SEGMENT (GEDAI)")
+    print("  STAGE 0: LOAD SUPER-SUBJECT EEG SEGMENT (GEDAI, concatenated)")
     print("=" * 70)
 
     try:
-        raw = load_test_retest_gedai_eeg_from_ids(
-            subject=args.subject,
+        raw = load_super_subject_eeg(
+            super_subject_id=args.super_subject,
             session=args.session,
             task=args.task,
+            subject_ids=subject_ids,
+            subjects_per_super_subject=args.subjects_per_super_subject,
+            subject_start_offset=args.subject_start_offset,
             db_path=db_path,
             t_start=args.t_start,
             t_stop=args.t_end,
@@ -411,14 +545,15 @@ def main() -> int:
         return 1
 
     sfreq = raw.info["sfreq"]
-    print(f"  Selected channels : {len(raw.ch_names)} (test-retest valid)")
-    print(f"  Channel names     : {raw.ch_names}")
-    print(f"  Sampling freq     : {sfreq:.2f} Hz")
-    print(f"  Cropped window    : {raw.times[0]:.2f} s -> {raw.times[-1]:.2f} s "
+    print(f"  Super-subject ID   : {args.super_subject} ({ss_label})")
+    print(f"  Channels (common)  : {len(raw.ch_names)}")
+    print(f"  Channel names      : {raw.ch_names}")
+    print(f"  Sampling freq      : {sfreq:.2f} Hz")
+    print(f"  Cropped window     : {raw.times[0]:.2f} s -> {raw.times[-1]:.2f} s "
           f"(duration: {raw.times[-1] - raw.times[0]:.2f} s)")
 
     # -----------------------------------------------------------------
-    # PSD de los canales originales del EEG (módulo spectral_analysis)
+    # PSD of the original (concatenated) EEG channels
     # -----------------------------------------------------------------
     psds_raw, freqs_raw, ch_names, mean_psd, std_psd, raw_psd_path = compute_and_plot_raw_psd(
         raw, out_dir=out_dir, fmin=args.l_freq, fmax=args.h_freq, bandwidth=2.5,
@@ -431,27 +566,27 @@ def main() -> int:
         plot_channel_topographies(
             raw, out_dir=out_dir,
             fmin=args.l_freq, fmax=args.h_freq,
-            subject=args.subject, session=args.session, task=args.task,
+            subject=ss_label, session=args.session, task=args.task,
         )
         plot_channel_correlation_matrix(
             raw, out_dir=out_dir,
-            subject=args.subject, session=args.session, task=args.task,
+            subject=ss_label, session=args.session, task=args.task,
         )
         print("  [OK] Plots exploratorios guardados.")
     except Exception as e:
         print(f"  [WARN] Error en plots exploratorios: {e}")
 
     # =====================================================================
-    # 2. EXTRACT (or LOAD CACHED) LATENT SUBSPACE FROM EEG
+    # 2. EXTRACT (or LOAD CACHED) LATENT SUBSPACE FROM CONCATENATED EEG
     # =====================================================================
     print("\n" + "=" * 70)
-    print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM EEG")
+    print("  STAGE 1: EXTRACT LATENT SUBSPACE FROM SUPER-SUBJECT EEG")
     print("=" * 70)
 
     if args.cache_file is None:
         args.cache_file = Path(
-            BASE_CACHE_PATH
-            + f"/cache_eeg_test_retest_gedai/{args.subject}/{args.session}"
+            str(BASE_CACHE_PATH)
+            + f"/cache_eeg_test_retest_gedai_super_subject/{ss_label}/{args.session}"
             + f"/task_{args.task}_latent_dim_{args.latent_dim}_{spec_label}_{spec_hash}"
             + f"/from{args.t_start}s_to_{args.t_end}s.npz"
         )
@@ -590,8 +725,7 @@ def main() -> int:
         except Exception as e:
             print(f"  [WARN] Error en plots Stage 3: {e}")
 
-    # Matriz de transicion de la combinacion seleccionada (siempre disponible
-    # cuando se uso markov)
+    # Transition matrix of the selected combination (always available when markov was used)
     if "markov" in spec["stage3_selection"]:
         try:
             Y2 = meta["Y"]   # (D, T)
@@ -603,7 +737,7 @@ def main() -> int:
             print(f"  [WARN] Error en plot de matriz de transicion: {e}")
 
     # -----------------------------------------------------------------
-    # PSD del espacio latente + influencia de canales sobre cada dimensión
+    # PSD of the latent space + channel influence per latent dimension
     # -----------------------------------------------------------------
     psds_latent, freqs_latent, mean_latent, std_latent, latent_psd_path = compute_and_plot_latent_psd(
         latent, sfreq=sfreq, out_dir=out_dir, fmin=args.l_freq, fmax=args.h_freq,
@@ -614,10 +748,10 @@ def main() -> int:
 
     # Plot latent trajectory
     plot_latent_trajectory(
-            latent,
-            out_dir=out_dir,
-            method_name=spec_label,
-        )
+        latent,
+        out_dir=out_dir,
+        method_name=spec_label,
+    )
 
     # =====================================================================
     # 3. SELECT DIMENSION(S) FOR KM ANALYSIS
@@ -700,7 +834,10 @@ def main() -> int:
     # =====================================================================
     config = CONFIGS['base_2D_model'].copy()
     config.update({
-        "model_name": f"testretest_gedai_{args.subject}_{args.session}_{args.task}_d{latent_dim}_{spec_label}",
+        "model_name": (
+            f"testretest_gedai_super_subject_{ss_label}_"
+            f"{args.session}_{args.task}_d{latent_dim}_{spec_label}"
+        ),
         "D": D,
         "bins": [args.km_bins] * D,
         "drift_components": list(range(D)),
@@ -880,7 +1017,11 @@ def main() -> int:
         print("-" * 50)
 
         metadata = {
-            "subject": args.subject,
+            "super_subject": args.super_subject,
+            "super_subject_label": ss_label,
+            "subject_ids": subject_ids or "auto-resolved",
+            "subjects_per_super_subject": args.subjects_per_super_subject,
+            "subject_start_offset": args.subject_start_offset,
             "session": args.session,
             "task": args.task,
             "t_start": args.t_start,
@@ -966,7 +1107,7 @@ def main() -> int:
         if result_iga.get('nonconservative_force') is not None:
             fig_v = plot_nonconservative_force_2d(
                 result_iga['nonconservative_force'], edges,
-                title=f"Fuerza no-conservativa v = f + D·∇U — {config['model_name'].upper()}",
+                title=f"Fuerza no-conservativa v = f + D grad U -- {config['model_name'].upper()}",
                 crop_to_valid=True,
             )
             fig_v.savefig(out_dir / "potential_2d_nonconservative_force.png", dpi=150)
@@ -980,7 +1121,7 @@ def main() -> int:
                 stream_function=result_iga.get('stream_function'),
                 nonconservative_force=result_iga.get('nonconservative_force'),
                 reconstructed_field=result_iga.get('reconstructed_field'),
-                title=f"{config['model_name'].upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)",
+                title=f"{config['model_name'].upper()} -- U (fondo) + v (flechas rojas) + streamlines (blanco)",
                 crop_to_valid=True,
             )
             fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
@@ -1030,13 +1171,14 @@ def main() -> int:
 
     total_time = time.time() - overall_t0
     print("\n" + "=" * 70)
-    print("  PIPELINE COMPLETED SUCCESSFULLY")
+    print("  SUPER-SUBJECT PIPELINE COMPLETED SUCCESSFULLY")
     print("=" * 70)
-    print(f"  Subject             : {args.subject}")
+    print(f"  Super-subject       : {args.super_subject} ({ss_label})")
     print(f"  Session             : {args.session}")
     print(f"  Task                : {args.task}")
     print(f"  Pipeline            : {spec_label} (hash {spec_hash})")
-    print(f"  Time window         : {args.t_start:.1f}s -> {args.t_end:.1f}s")
+    print(f"  Per-subject window  : {args.t_start:.1f}s -> {args.t_end:.1f}s")
+    print(f"  Concatenated length : {raw.times[-1] - raw.times[0]:.1f} s")
     print(f"  Total wall-clock    : {total_time:.1f} s")
     print(f"  Output saved to     : {out_dir.absolute()}")
     if save_potential_flag:

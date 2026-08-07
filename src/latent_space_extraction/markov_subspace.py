@@ -206,7 +206,8 @@ def find_best_subspace_markov(
     n_workers: int | None = None,
     show_progress: bool = True,
     maximize: bool = False,
-) -> tuple[tuple[int, ...] | None, float]:
+    return_all_taus: bool = False,
+) -> tuple:
     """
     Exhaustively search for the N-component subspace with the *smallest*
     Markov relaxation time.
@@ -224,6 +225,10 @@ def find_best_subspace_markov(
         for serial execution.
     show_progress : bool, default True
         Show a tqdm progress bar.
+    return_all_taus : bool, default False
+        If True, also return the list of ``(combination, tau)`` for every
+        evaluated combination.  Used by the plotters module to generate
+        Stage-3 diagnostic plots (heatmap, ranked, distribution).
 
     Returns
     -------
@@ -232,6 +237,9 @@ def find_best_subspace_markov(
         found (all returned ``inf``).
     best_tau : float
         Minimum relaxation time achieved (``np.inf`` if no valid subspace).
+    all_taus : list of (tuple, float), optional
+        Only returned if ``return_all_taus=True``.  Each entry is
+        ``(combination, tau)`` for every combination evaluated.
 
     Raises
     ------
@@ -290,7 +298,9 @@ def find_best_subspace_markov(
                 best_comb = comb
     if maximize and best_comb is None:
         best_tau = np.inf  # No valid subspace found
-        
+
+    if return_all_taus:
+        return best_comb, float(best_tau), results
     return best_comb, float(best_tau)
 
 
