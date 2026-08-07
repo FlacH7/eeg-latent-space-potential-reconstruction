@@ -2,7 +2,7 @@
   "pipeline_module": "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai",
 
   "subjects": {
-    "start": 2,
+    "start": 1,
     "end": 5
   },
 
