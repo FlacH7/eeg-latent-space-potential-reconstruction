@@ -101,6 +101,8 @@ from src.plotters.pipeline_overview import (
 # ---------------------------------------------------------------------------
 from src.plotters._markov_helpers import compute_transition_matrix
 
+from trajectory_plots import plot_latent_trajectory
+
 
 __all__ = [
     # Style
@@ -141,4 +143,5 @@ __all__ = [
     "plot_pipeline_flowchart",
     # Helpers
     "compute_transition_matrix",
+    "plot_latent_trajectory"
 ]
