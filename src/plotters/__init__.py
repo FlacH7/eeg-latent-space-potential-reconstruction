@@ -101,7 +101,7 @@ from src.plotters.pipeline_overview import (
 # ---------------------------------------------------------------------------
 from src.plotters._markov_helpers import compute_transition_matrix
 
-from trajectory_plots import plot_latent_trajectory
+from src.plotters.trajectory_plots import plot_latent_trajectory
 
 
 __all__ = [
