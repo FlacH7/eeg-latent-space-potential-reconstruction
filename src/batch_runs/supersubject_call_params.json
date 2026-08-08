@@ -5,7 +5,7 @@
     "selected": [1, 2, 3],
     "subjects_per_super_subject": 20,
     "subject_start_offset": 1,
-    "total_subjects": 10,
+    "total_subjects": 60,
     "_comment_groups": "Opcional: si se define 'groups', toma precedencia sobre la auto-resolucion. Las claves pueden ser enteros o strings; los valores son listas de indices de sujetos. Ejemplo: \"groups\": {\"1\": [1,2,...,20], \"2\": [21,...,40], \"3\": [41,...,60]}"
   },
 
@@ -23,7 +23,7 @@
     {
       "label": "hankel+pca_ica+markov_fastest",
       "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 60},
+      "stage1_params": {"depth": 10},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
         "ica_method": "picard",
@@ -38,7 +38,7 @@
     {
       "label": "hankel+pca_ica+markov_slowest",
       "stage1_embedding": "hankel",
-      "stage1_params": {},
+      "stage1_params": {"depth": 10},
       "stage2_dynamics": "pca_ica",
       "stage2_params": {
         "ica_method": "picard",
