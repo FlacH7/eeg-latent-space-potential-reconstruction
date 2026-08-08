@@ -527,6 +527,8 @@ def main() -> int:
     print("=" * 70)
 
     try:
+        print(f"  Loading super-subject EEG ({len(subject_ids) if subject_ids else args.subjects_per_super_subject} subjects)...")
+        sys.stdout.flush()
         raw = load_super_subject_eeg(
             super_subject_id=args.super_subject,
             session=args.session,
@@ -540,6 +542,7 @@ def main() -> int:
             preload=False,
             verbose=verbose,
         )
+        sys.stdout.flush()
     except (FileNotFoundError, ValueError) as exc:
         print(f"[ERROR] {exc}")
         return 1
@@ -610,6 +613,9 @@ def main() -> int:
         if args.ignore_cache and cache_path.exists():
             print("\n  [CACHE] --ignore-cache set. Recomputing latent space...")
 
+        print("\n  [INFO] Starting latent space extraction (this may take several minutes)...")
+        sys.stdout.flush()
+
         latent, meta = extract_latent_space(
             raw,
             n_dim=args.latent_dim,
@@ -624,6 +630,7 @@ def main() -> int:
             n_workers=args.workers,
             verbose=verbose,
         )
+        sys.stdout.flush()
 
         print(f"\n  [CACHE] Saving latent space to: {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -852,6 +859,7 @@ def main() -> int:
     print("\n" + "=" * 70)
     print("  STAGE 2: BANDWIDTH OPTIMISATION")
     print("=" * 70)
+    sys.stdout.flush()
 
     result_bw = optimal_bw(
         data=data,
@@ -867,6 +875,7 @@ def main() -> int:
         auto_weight=True,
     )
     bw_opt = result_bw["optimal_bw"]
+    sys.stdout.flush()
     print(f"\n  Optimal bandwidth: {bw_opt:.4f}")
     print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
     print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")

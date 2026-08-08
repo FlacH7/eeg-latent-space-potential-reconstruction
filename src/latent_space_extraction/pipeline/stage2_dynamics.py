@@ -52,6 +52,7 @@ Critical handoffs implemented here (see refactor specification §5)
 
 from __future__ import annotations
 
+import sys
 import time
 
 import numpy as np
@@ -335,20 +336,19 @@ class PCAICADynamics:
         )
 
         # (a) Truncated SVD of H
+        print(f"  [Stage2/pca_ica] Step (a): Truncated SVD of H {H.shape} → rank {n_components}...")
+        sys.stdout.flush()
         U, s, Vh = _truncated_svd(H, n_components)
+        print(f"  [Stage2/pca_ica] SVD done ({time.time() - t0:.2f}s). Whitening...")
+        sys.stdout.flush()
 
-        # (b) Whitened PC matrix (spec §5 Empate 1.2b).
-        #     The PC time courses are Σ Vᵀ (row variance ≈ σ²); whitening
-        #     removes the per-row scale.  The spec's "Z = Σ^{-1/2} Vᵀ" is
-        #     implemented in its equivalent form: standardise the PC time
-        #     courses to unit variance.  (Any positive row scaling is
-        #     absorbed by FastICA's internal whitening, so this choice is
-        #     exact up to an irrelevant per-row constant.)
+        # (b) Whitened PC matrix
         Z = np.diag(s) @ Vh                    # PC time courses Σ Vᵀ
         Z = Z / Z.std(axis=1, keepdims=True)   # whitened: unit-variance rows
 
         # (c) sklearn FastICA over the whitened PCs.
-        #     sklearn expects (n_samples, n_features) → time × PCs.
+        print(f"  [Stage2/pca_ica] Step (c): FastICA on {n_components} whitened PCs ({Z.shape[1]:,} time points)...")
+        sys.stdout.flush()
         from sklearn.decomposition import FastICA
 
         ica = FastICA(

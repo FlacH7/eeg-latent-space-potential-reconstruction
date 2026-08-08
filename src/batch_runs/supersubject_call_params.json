@@ -5,7 +5,7 @@
     "selected": [1, 2, 3],
     "subjects_per_super_subject": 20,
     "subject_start_offset": 1,
-    "total_subjects": 60,
+    "total_subjects": 10,
     "_comment_groups": "Opcional: si se define 'groups', toma precedencia sobre la auto-resolucion. Las claves pueden ser enteros o strings; los valores son listas de indices de sujetos. Ejemplo: \"groups\": {\"1\": [1,2,...,20], \"2\": [21,...,40], \"3\": [41,...,60]}"
   },
 

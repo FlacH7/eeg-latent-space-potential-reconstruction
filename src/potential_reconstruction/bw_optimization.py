@@ -21,6 +21,7 @@ Novedad v3.0:
 
 import numpy as np
 import os
+import sys
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
@@ -326,6 +327,10 @@ def optimal_bw(data, bins, dt=1.0, p=2, kernel='epanechnikov',
                     except Exception as e:
                         print(f"[optimal_bw] Error en worker bw={args_list[i][2]:.4f}: {e}")
                     pbar.update(1)
+        # FIX: ProcessPoolExecutor cleanup puede demorar
+        sys.stdout.flush()
+        print("[optimal_bw] Scan complete. Processing results...")
+        sys.stdout.flush()
     else:
         with tqdm(total=n, desc="Scanning bw", unit="bw") as pbar:
             for i, arg in enumerate(args_list):
@@ -342,6 +347,7 @@ def optimal_bw(data, bins, dt=1.0, p=2, kernel='epanechnikov',
                 except Exception as e:
                     print(f"[optimal_bw] Error en bw={arg[2]:.4f}: {e}")
                 pbar.update(1)
+        sys.stdout.flush()
 
     # Reordenar por índice original
     potentials = [p for _, p in sorted(potentials, key=lambda x: x[0])]
