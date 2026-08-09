@@ -11,7 +11,7 @@
 
   "sessions": ["session1"],
 
-  "tasks": ["eyesclosed", "eyesopen","music"],
+  "tasks": ["eyesclosed","music"],
 
   "time_window": {
     "t_start": 0.0,
@@ -21,34 +21,27 @@
 
   "methods": [
     {
-      "label": "hankel+pca_ica+markov_fastest",
+      "label": "hankel+pca+top_2",
       "stage1_embedding": "hankel",
       "stage1_params": {"depth": 10},
-      "stage2_dynamics": "pca_ica",
+      "stage2_dynamics": "pca",
       "stage2_params": {
-        "ica_method": "picard",
         "n_components": 20
       },
-      "stage3_selection": "markov_fastest",
-      "stage3_params": {
-        "n_bins": 10,
-        "search_strategy": "exhaustive"
-      }
+      "stage3_selection": "top_n",
+      "stage3_params": {}
     },
     {
-      "label": "hankel+pca_ica+markov_slowest",
+      "label": "hankel+diff_maps+top_2",
       "stage1_embedding": "hankel",
       "stage1_params": {"depth": 10},
-      "stage2_dynamics": "pca_ica",
+      "stage2_dynamics": "diffusion_maps",
       "stage2_params": {
-        "ica_method": "picard",
-        "n_components": 20
+        "svd_rank": 20,
+        "k": 100
       },
-      "stage3_selection": "markov_slowest",
-      "stage3_params": {
-        "n_bins": 10,
-        "search_strategy": "exhaustive"
-      }
+      "stage3_selection": "top_n",
+      "stage3_params": {}
     }
   ],
 
