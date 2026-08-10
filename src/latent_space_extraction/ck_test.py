@@ -6,12 +6,27 @@ Tests whether a low-dimensional trajectory satisfies the Chapman-Kolmogorov
 equation, a necessary condition for the process to be Markovian.
 
 The CK equation states that for a Markov process the transition probability
-can be composed:
+can be composed::
 
     T(tau) = T(tau/2) @ T(tau/2)
 
 If this does not hold, the process has memory beyond the current state and
 the Kramers-Moyal expansion may not be valid.
+
+Memory optimisation (v2)
+-------------------------
+With D=4 and n_bins=20 the full state space has 160 000 states.  A dense
+(160k, 160k) float64 matrix requires ~205 GB which is infeasible.  This
+module applies three complementary strategies:
+
+1. **Occupied-state remapping**  — only the ~10-16k states actually visited
+   are kept, shrinking the matrix to (n_occ, n_occ).
+2. **Sparse matrices (scipy CSR)** — even after remapping most rows have
+   far fewer non-zero entries than n_occ.
+3. **Power-iteration for pi** — replaces ``np.linalg.eig`` (O(n^3) dense)
+   with a fast sparse-friendly fixed-point iteration.
+4. **No T_matrices hoarding** — transition matrices are not stored by
+   default (opt-in via ``store_T_matrices=True``).
 
 Typical usage from the IGA pipeline::
 
@@ -35,11 +50,15 @@ Typical usage from the IGA pipeline::
 
 from __future__ import annotations
 
+import gc
+import sys
 import time
 from pathlib import Path
 from typing import Sequence, Literal
 
 import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import eigs as sparse_eigs
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -57,7 +76,7 @@ DEFAULT_TAU_MULTIPLIERS: Sequence[int] = (1, 2, 3, 4, 5, 6, 8, 10, 12, 16,
 
 
 # ---------------------------------------------------------------------------
-# Discretisation
+# Discretisation (unchanged)
 # ---------------------------------------------------------------------------
 
 def _discretise_uniform(
@@ -67,22 +86,6 @@ def _discretise_uniform(
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """
     Discretise each dimension of *data* into *n_bins* uniform-width bins.
-
-    Parameters
-    ----------
-    data : ndarray, shape (n_samples, D)
-        Continuous trajectory.
-    n_bins : int
-        Number of bins per dimension.
-    pad : float
-        Fractional padding beyond [min, max] to ensure all points fit.
-
-    Returns
-    -------
-    states : ndarray, shape (n_samples,)
-        Flattened state index for each sample (mixed-radix enumeration).
-    edges : list of ndarrays
-        Bin edges for each dimension.
     """
     D = data.shape[1]
     edges = []
@@ -129,90 +132,178 @@ def _discretise_by_quantiles(
 
 
 # ---------------------------------------------------------------------------
-# Transition matrix estimation
+# Occupied-state remapping
 # ---------------------------------------------------------------------------
 
-def _estimate_transition_matrix(
+def _remap_to_occupied(
+    states: np.ndarray,
+) -> tuple[np.ndarray, dict[int, int], int]:
+    """
+    Remap state indices to a compact 0..n_occupied-1 range.
+
+    Parameters
+    ----------
+    states : ndarray, shape (n_samples,)
+        Original (possibly sparse) state indices.
+
+    Returns
+    -------
+    states_compact : ndarray, shape (n_samples,)
+        Remapped state indices in [0, n_occupied).
+    inv_map : dict[int, int]
+        Mapping  compact_index -> original_state_id.
+    n_occupied : int
+        Number of distinct states visited.
+    """
+    unique_states = np.unique(states)
+    n_occupied = len(unique_states)
+    # Vectorised remap: build a lookup table sized to max(states)+1
+    max_state = int(states.max()) + 1
+    lut = np.full(max_state, -1, dtype=np.int64)
+    lut[unique_states] = np.arange(n_occupied, dtype=np.int64)
+    states_compact = lut[states]
+
+    # inv_map: compact -> original (for potential downstream use)
+    inv_map = {int(i): int(s) for i, s in enumerate(unique_states)}
+
+    return states_compact, inv_map, n_occupied
+
+
+# ---------------------------------------------------------------------------
+# Sparse transition matrix estimation
+# ---------------------------------------------------------------------------
+
+def _estimate_transition_matrix_sparse(
     states: np.ndarray,
     lag: int,
     n_states: int,
-) -> np.ndarray:
+) -> sparse.csr_matrix:
     """
-    Estimate the row-normalised transition matrix T^{(lag)} by counting.
+    Estimate the row-normalised transition matrix T^{(lag)} using sparse
+    counting.  Returns a CSR matrix of shape (n_states, n_states).
     """
     n_samples = len(states)
-    counts = np.zeros((n_states, n_states), dtype=float)
-
     src = states[:n_samples - lag]
     dst = states[lag:]
 
-    flat_idx = src.astype(int) * n_states + dst.astype(int)
-    np.add.at(counts.ravel(), flat_idx, 1.0)
+    # Build count matrix via COO -> CSR (memory-efficient)
+    flat_idx = src.astype(np.int64) * np.int64(n_states) + dst.astype(np.int64)
+    # Count transitions using bincount on compact flat indices
+    # But flat_idx can be large, so use sparse directly
+    counts = sparse.coo_matrix(
+        (np.ones(len(src), dtype=np.float64), (src, dst)),
+        shape=(n_states, n_states),
+    ).tocsr()
 
-    row_sums = counts.sum(axis=1, keepdims=True)
+    # Row-normalise
+    row_sums = np.asarray(counts.sum(axis=1)).ravel()
+    # Avoid division by zero for unvisited rows
     row_sums[row_sums == 0] = 1.0
-    T = counts / row_sums
-
-    # Unvisited states -> uniform (prevents NaN in composition)
-    unvisited = (counts.sum(axis=1) == 0)
-    T[unvisited, :] = 1.0 / n_states
+    # Invert for division
+    inv_sums = sparse.diags(1.0 / row_sums)
+    T = inv_sums @ counts
 
     return T
 
 
 # ---------------------------------------------------------------------------
-# CK error: population-weighted Frobenius norm
+# Stationary distribution via power iteration (sparse-friendly)
 # ---------------------------------------------------------------------------
 
-def _ck_error_weighted(
-    T_tau: np.ndarray,
-    T_half: np.ndarray,
+def _stationary_distribution_power(
+    T: sparse.csr_matrix,
+    max_iter: int = 500,
+    tol: float = 1e-10,
+) -> np.ndarray:
+    """
+    Estimate the stationary distribution pi of a transition matrix T
+    using the power method on T^T.
+
+    This avoids the O(n^3) dense eigendecomposition and works directly
+    on sparse matrices.
+    """
+    n = T.shape[0]
+    pi = np.ones(n, dtype=np.float64) / n
+
+    Tt = T.T.tocsr()
+
+    for _ in range(max_iter):
+        pi_new = pi @ Tt  # equivalent to Tt.T @ pi, but row vector
+        pi_new_sum = pi_new.sum()
+        if pi_new_sum == 0:
+            break
+        pi_new = pi_new / pi_new_sum
+        # Check convergence (L1 norm of change)
+        delta = np.abs(pi_new - pi).sum()
+        pi = pi_new
+        if delta < tol:
+            break
+
+    # Ensure non-negative and normalised
+    pi = np.abs(pi)
+    pi_sum = pi.sum()
+    if pi_sum > 0:
+        pi = pi / pi_sum
+    else:
+        pi = np.ones(n, dtype=np.float64) / n
+
+    return pi
+
+
+# ---------------------------------------------------------------------------
+# CK error: population-weighted Frobenius norm (sparse-aware)
+# ---------------------------------------------------------------------------
+
+def _ck_error_weighted_sparse(
+    T_tau: sparse.csr_matrix,
+    T_half: sparse.csr_matrix,
     pi: np.ndarray | None = None,
 ) -> float:
     """
-    Population-weighted CK error.
-
-    Measures the discrepancy between the directly estimated transition
-    matrix T(tau) and the composed matrix T(tau/2)^2.  Only the *K*
-    most populated states contribute, weighted by their stationary
-    probability, which makes the metric robust against poorly sampled
-    tail states.
+    Population-weighted CK error using sparse matrices.
 
     Parameters
     ----------
-    T_tau : ndarray, shape (n_states, n_states)
-        Transition matrix at lag tau.
-    T_half : ndarray
-        Transition matrix at lag tau/2.
-    pi : ndarray, optional
-        Stationary distribution (eigenvector of T_tau^T with eigenvalue 1).
-        If None, estimated from row sums of the count matrix (approximation).
+    T_tau : sparse.csr_matrix, shape (n, n)
+    T_half : sparse.csr_matrix, shape (n, n)
+    pi : ndarray, shape (n,), optional
+        Stationary distribution.  If None, estimated via power iteration.
 
     Returns
     -------
     error : float in [0, 1]
-        Weighted Frobenius-norm CK error normalised by ||T_tau||_F.
     """
+    # Compose: T_half @ T_half (sparse @ sparse = sparse)
     T_composed = T_half @ T_half
+
+    # Diff: sparse - sparse = sparse
     diff = T_tau - T_composed
 
-    # Use stationary distribution as weights (focus on well-sampled states)
     if pi is None:
-        # Approximate pi from row-normalised counts (symmetrise)
-        eigvals, eigvecs = np.linalg.eig(T_tau.T)
-        idx = np.argmax(np.real(eigvals))
-        pi = np.real(eigvecs[:, idx])
-        pi = np.abs(pi)
-        pi = pi / pi.sum()
+        pi = _stationary_distribution_power(T_tau)
 
-    # Weight the error by stationary probability of each initial state
-    weighted_diff = diff * np.sqrt(pi[:, None])
+    # Weight by sqrt(pi): convert diff and T_tau to dense for the
+    # Frobenius norm computation (the dense matrix is now n_occ x n_occ,
+    # which is manageable)
+    sqrt_pi = np.sqrt(pi)
+
+    # Convert to dense for norm computation
+    # n_occ is typically ~16k, so dense is ~2 GB — acceptable
+    diff_dense = diff.toarray()
+    T_tau_dense = T_tau.toarray()
+
+    weighted_diff = diff_dense * sqrt_pi[:, None]
+    weighted_T = T_tau_dense * sqrt_pi[:, None]
+
     numerator = np.linalg.norm(weighted_diff, ord="fro")
-    denominator = np.linalg.norm(T_tau * np.sqrt(pi[:, None]), ord="fro")
+    denominator = np.linalg.norm(weighted_T, ord="fro")
+
+    del diff_dense, T_tau_dense, diff, T_composed
+    gc.collect()
 
     if denominator == 0:
         return 1.0
-    return numerator / denominator
+    return float(numerator / denominator)
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +323,8 @@ def chapman_kolmogorov_test(
     plot: bool = True,
     out_dir: str | Path | None = None,
     verbose: bool = True,
+    store_T_matrices: bool = False,
+    max_samples_for_tm: int | None = None,
 ) -> dict:
     """
     Test whether a low-dimensional trajectory is Markovian via the
@@ -239,7 +332,7 @@ def chapman_kolmogorov_test(
 
     For each candidate lag *tau*, the function:
     1. Discretises the state space into bins (uniform or quantile).
-    2. Estimates T(tau) and T(tau/2).
+    2. Estimates T(tau) and T(tau/2) on the **occupied-state subspace**.
     3. Compares T(tau) with T(tau/2) @ T(tau/2).
     4. Reports the population-weighted Frobenius-norm error.
 
@@ -258,57 +351,37 @@ def chapman_kolmogorov_test(
     n_bins : int, default 20
         Number of bins per dimension.
     discretisation : ``"uniform"`` | ``"quantile"``, default ``"uniform"``
-        Binning strategy.  ``"uniform"`` uses equal-width bins (better
-        for Gaussian data); ``"quantile"`` uses equal-count bins.
+        Binning strategy.
     threshold : float, default 0.15
         CK error threshold for declaring Markovianity.
-        Values in the 0.10--0.20 range are typical for continuous
-        stochastic processes; 0.15 is a pragmatic default.
     top_k_states : int or None, optional
-        Number of most-populated states to use in the CK error.
-        ``None`` uses all states.
+        (Unused in v2; kept for API compatibility.)
     min_occupancy : float, default 0.3
         Minimum fraction of bins that must be occupied.
     plot : bool, default True
         Whether to generate the CK error vs tau plot.
     out_dir : str or Path, optional
-        Directory to save the plot.  If None, plot is returned but not saved.
+        Directory to save the plot.
     verbose : bool, default True
         Print progress and results.
+    store_T_matrices : bool, default False
+        If True, store all transition matrices in the returned dict.
+        **WARNING**: with n_occ ~ 16k each dense matrix is ~2 GB;
+        storing 22 of them requires ~44 GB.  Use with caution.
+    max_samples_for_tm : int or None, optional
+        If set, subsample the trajectory to at most this many samples
+        for transition matrix estimation (speed + memory).  The full
+        trajectory is still used for discretisation edges.  None = no
+        subsampling.
 
     Returns
     -------
     result : dict
-        Dictionary with keys:
+        Same keys as the original implementation, plus:
 
-        * ``is_markovian``     — bool, True if CK error < threshold for some tau.
-        * ``tau_star``         — float [s], smallest tau with CK error < threshold.
-          ``np.inf`` if no such tau exists.
-        * ``tau_star_idx``     — int, index in ``tau_candidates`` of tau*.
-        * ``min_error``        — float, minimum CK error across all taus.
-        * ``min_error_tau``    — float [s], tau at which min_error occurs.
-        * ``tau_values``       — ndarray [s], all candidate taus tested.
-        * ``ck_errors``        — ndarray, CK error for each tau.
-        * ``n_bins``           — int, bins per dimension.
-        * ``n_occupied_bins``  — int, number of occupied bins.
-        * ``occupancy``        — float, fraction of bins occupied.
-        * ``threshold``        — float, threshold used.
-        * ``fig``              — matplotlib Figure (if plot=True) or None.
-        * ``transition_matrices`` — dict mapping tau (s) to T matrix.
-
-    Interpretation guidelines
-    -------------------------
-    * ``is_markovian == True`` and ``tau_star`` small (few dt):
-      The latent space is well-approximated as Markovian.  Use ``tau_star``
-      as the *lag* for Kramers-Moyal estimation.
-    * ``is_markovian == True`` but ``tau_star`` large (> 50 dt):
-      The process is Markovian but only at coarse time resolution.  The
-      Kramers-Moyal estimate may lose fine temporal structure.
-    * ``is_markovian == False``:
-      The latent space retains memory.  Consider:
-      - Increasing the latent dimension.
-      - Increasing the embedding depth (for Hankel+DMD).
-      - Using the lag at minimum error as a pragmatic compromise.
+        * ``n_occupied``      — int, number of occupied states used.
+        * ``memory_mode``     — str, ``"sparse_remapped"``.
+        * ``transition_matrices`` — dict (only if *store_T_matrices* is True).
     """
     t0 = time.time()
 
@@ -318,7 +391,7 @@ def chapman_kolmogorov_test(
 
     if verbose:
         print("\n" + "=" * 70)
-        print("  CHAPMAN-KOLMOGOROV MARKOVIANITY TEST")
+        print("  CHAPMAN-KOLMOGOROV MARKOVIANITY TEST  (memory-optimised)")
         print("=" * 70)
         print(f"  Data shape      : {data.shape}")
         print(f"  dt              : {dt:.6f} s  ({1/dt:.1f} Hz)")
@@ -336,27 +409,60 @@ def chapman_kolmogorov_test(
     else:
         states, edges = _discretise_by_quantiles(data, n_bins)
 
-    n_states = n_bins ** D
-    occupied = len(np.unique(states))
-    occupancy = occupied / n_states
+    n_full_states = n_bins ** D
+    all_unique = np.unique(states)
+    n_occupied = len(all_unique)
+    occupancy = n_occupied / n_full_states
 
     if verbose:
-        print(f"\n  Occupied bins   : {occupied}/{n_states} ({occupancy:.1%})")
+        print(f"\n  Occupied bins   : {n_occupied}/{n_full_states} ({occupancy:.1%})")
 
     if occupancy < min_occupancy:
         print(f"  [WARN] Occupancy {occupancy:.1%} < {min_occupancy} — "
               f"consider reducing n_bins (current: {n_bins})")
 
     # ------------------------------------------------------------------
+    # 1b. Remap to occupied states (KEY OPTIMISATION)
+    # ------------------------------------------------------------------
+    if verbose:
+        print(f"  Remapping {n_full_states} states -> {n_occupied} occupied states...")
+
+    states_compact, inv_map, n_occ = _remap_to_occupied(states)
+    del states  # free the original large-index array
+    gc.collect()
+
+    if verbose:
+        mem_dense = n_full_states ** 2 * 8 / 1e9
+        mem_compact = n_occ ** 2 * 8 / 1e9
+        print(f"  Dense T would be : {mem_dense:.1f} GB  ({n_full_states}x{n_full_states})")
+        print(f"  Compact T size   : {mem_compact:.1f} GB  ({n_occ}x{n_occ})")
+        print(f"  Reduction factor : {mem_dense / mem_compact:.0f}x")
+
+    # ------------------------------------------------------------------
+    # 1c. Optional subsampling for transition counting
+    # ------------------------------------------------------------------
+    states_for_tm = states_compact
+    if max_samples_for_tm is not None and len(states_compact) > max_samples_for_tm:
+        if verbose:
+            print(f"  Subsampling {len(states_compact)} -> {max_samples_for_tm} for TM estimation")
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(states_compact), size=max_samples_for_tm, replace=False)
+        idx = np.sort(idx)  # keep temporal order for transition counting
+        states_for_tm = states_compact[idx]
+        del idx
+        gc.collect()
+
+    # ------------------------------------------------------------------
     # 2. Candidate lags
     # ------------------------------------------------------------------
     if tau_candidates is None:
-        tau_steps = np.array(DEFAULT_TAU_MULTIPLIERS, dtype=int)
-        tau_candidates = tau_steps * dt
+        tau_steps_arr = np.array(DEFAULT_TAU_MULTIPLIERS, dtype=int)
+        tau_candidates = tau_steps_arr * dt
     else:
         tau_candidates = np.asarray(tau_candidates, dtype=float)
 
-    max_tau_samples = n_samples // 3
+    n_tm_samples = len(states_for_tm)
+    max_tau_samples = n_tm_samples // 3
     max_tau = max_tau_samples * dt
     valid_mask = tau_candidates <= max_tau
     tau_values = tau_candidates[valid_mask]
@@ -380,25 +486,35 @@ def chapman_kolmogorov_test(
     # 3. Compute CK error for each tau
     # ------------------------------------------------------------------
     ck_errors = np.full(len(tau_values), np.nan)
-    T_matrices = {}
+    T_matrices = {} if store_T_matrices else None
 
     if verbose:
         print(f"\n  {'Tau (s)':>10}  {'Steps':>7}  {'CK error':>12}  {'Status'}")
         print(f"  {'-'*10}  {'-'*7}  {'-'*12}  {'-'*8}")
+        sys.stdout.flush()
 
     for i, (tau_s, lag) in enumerate(zip(tau_values, tau_steps)):
-        T_tau = _estimate_transition_matrix(states, lag, n_states)
+        iter_t0 = time.time()
 
+        T_tau = _estimate_transition_matrix_sparse(states_for_tm, lag, n_occ)
         half_lag = max(lag // 2, 1)
-        T_half = _estimate_transition_matrix(states, half_lag, n_states)
+        T_half = _estimate_transition_matrix_sparse(states_for_tm, half_lag, n_occ)
 
-        err = _ck_error_weighted(T_tau, T_half)
+        err = _ck_error_weighted_sparse(T_tau, T_half)
         ck_errors[i] = err
-        T_matrices[float(tau_s)] = T_tau
+
+        if store_T_matrices:
+            T_matrices[float(tau_s)] = T_tau.toarray()
+
+        # Free memory aggressively
+        del T_tau, T_half
+        gc.collect()
 
         status = "OK" if err < threshold else "---"
+        iter_time = time.time() - iter_t0
         if verbose:
-            print(f"  {tau_s:10.4f}  {lag:7d}  {err:12.6f}  {status}")
+            print(f"  {tau_s:10.4f}  {lag:7d}  {err:12.6f}  {status}  ({iter_time:.1f}s)")
+            sys.stdout.flush()
 
     # ------------------------------------------------------------------
     # 4. Determine tau*
@@ -462,10 +578,11 @@ def chapman_kolmogorov_test(
             out_dir = Path(out_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             fig.savefig(out_dir / "ck_test.png", dpi=150)
+            plt.close(fig)
             if verbose:
                 print(f"\n  [PLOT] Saved CK test plot to: {out_dir / 'ck_test.png'}")
 
-    return {
+    result = {
         "is_markovian": is_markovian,
         "tau_star": tau_star,
         "tau_star_idx": tau_star_idx,
@@ -474,17 +591,23 @@ def chapman_kolmogorov_test(
         "tau_values": tau_values,
         "ck_errors": ck_errors,
         "n_bins": n_bins,
-        "n_occupied_bins": occupied,
+        "n_occupied_bins": n_occupied,
         "occupancy": occupancy,
         "threshold": threshold,
         "discretisation": discretisation,
         "fig": fig,
-        "transition_matrices": T_matrices,
+        "n_occupied": n_occ,
+        "memory_mode": "sparse_remapped",
     }
+
+    if store_T_matrices:
+        result["transition_matrices"] = T_matrices
+
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Plotting
+# Plotting (unchanged)
 # ---------------------------------------------------------------------------
 
 def _plot_ck_results(
@@ -538,7 +661,7 @@ def _plot_ck_results(
     ax.set_title(
         f"Chapman-Kolmogorov Test  —  {D}D  —  "
         f"bins={n_bins}$^{D}$, {discretisation}, occ={occupancy:.0%}  —  "
-        f"$\\mathbf{{{verdict_str}}}$",
+        f"$\mathbf{{{verdict_str}}}$",
         fontsize=12, color=verdict_color, fontweight="bold",
     )
 
@@ -561,13 +684,13 @@ def _demo():
     dt = 1.0 / 250.0
 
     # 2D Ornstein-Uhlenbeck (known to be Markovian)
-    tau = 0.05
+    tau_ou = 0.05
     sigma = 0.5
     x = np.zeros(n)
     y = np.zeros(n)
     for t in range(1, n):
-        x[t] = x[t-1] - x[t-1] * dt / tau + sigma * np.sqrt(dt) * np.random.randn()
-        y[t] = y[t-1] - y[t-1] * dt / tau + sigma * np.sqrt(dt) * np.random.randn()
+        x[t] = x[t-1] - x[t-1] * dt / tau_ou + sigma * np.sqrt(dt) * np.random.randn()
+        y[t] = y[t-1] - y[t-1] * dt / tau_ou + sigma * np.sqrt(dt) * np.random.randn()
     data = np.column_stack([x, y])
 
     print("Demo: 2D Ornstein-Uhlenbeck (should be Markovian)\n")
@@ -579,4 +702,5 @@ def _demo():
 
 
 if __name__ == "__main__":
+    import sys
     _demo()
