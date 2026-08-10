@@ -860,29 +860,32 @@ def main() -> int:
     print("  STAGE 2: BANDWIDTH OPTIMISATION")
     print("=" * 70)
     sys.stdout.flush()
+    if D < 4:
+        result_bw = optimal_bw(
+            data=data,
+            bins=config["bins"],
+            dt=dt,
+            p=2,
+            kernel="epanechnikov",
+            theoretical=None,
+            sigma_smooth=1.0,
+            n_candidates=30,
+            n_jobs=-1 if D + config["degree"] <= 4 else 1,
+            plot=True,
+            auto_weight=True,
+        )
+        bw_opt = result_bw["optimal_bw"]
+        sys.stdout.flush()
+        print(f"\n  Optimal bandwidth: {bw_opt:.4f}")
+        print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
+        print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
 
-    result_bw = optimal_bw(
-        data=data,
-        bins=config["bins"],
-        dt=dt,
-        p=2,
-        kernel="epanechnikov",
-        theoretical=None,
-        sigma_smooth=1.0,
-        n_candidates=30,
-        n_jobs=-1 if D + config["degree"] <= 4 else 1,
-        plot=True,
-        auto_weight=True,
-    )
-    bw_opt = result_bw["optimal_bw"]
-    sys.stdout.flush()
-    print(f"\n  Optimal bandwidth: {bw_opt:.4f}")
-    print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
-    print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
-
-    if "fig" in result_bw:
-        result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
-        plt.close(result_bw["fig"])
+        if "fig" in result_bw:
+            result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
+            plt.close(result_bw["fig"])
+    else:
+        print("  [WARN] Bandwidth optimisation skipped for D >= 4 (computationally expensive).")
+        bw_opt = 0.0002
 
     # =====================================================================
     # 6. ESTIMATE KM COEFFICIENTS
