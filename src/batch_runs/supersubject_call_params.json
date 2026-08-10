@@ -30,18 +30,6 @@
       },
       "stage3_selection": "top_n",
       "stage3_params": {}
-    },
-    {
-      "label": "hankel+diff_maps+top_2",
-      "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
-      "stage2_dynamics": "diffusion_maps",
-      "stage2_params": {
-        "svd_rank": 20,
-        "k": 100
-      },
-      "stage3_selection": "top_n",
-      "stage3_params": {}
     }
   ],
 
