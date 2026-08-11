@@ -107,7 +107,7 @@ def plot_topomap_grid(
     weights: np.ndarray,
     dim_labels: list[str],
     title: str = "Channel influence on latent space",
-    cmap: str = "Reds",
+    cmap: str = "RdBu_r",
 ) -> plt.Figure:
     """Cuadrícula con un topoplot por dimensión latente.
 
@@ -116,7 +116,9 @@ def plot_topomap_grid(
     info:
         ``mne.Info`` con los canales de ``weights`` y posiciones (montaje).
     weights:
-        Array ``(n_channels, n_dim)`` con la influencia normalizada.
+        Array ``(n_channels, n_dim)`` con la influencia normalizada,
+        con signo (``[-1, 1]``). Se usa un colormap divergente con
+        rango simétrico para representar influencias negativas.
     dim_labels:
         Etiquetas de las dimensiones latentes.
     """
@@ -125,7 +127,7 @@ def plot_topomap_grid(
     weights = np.asarray(weights, dtype=float)
     n_dim = weights.shape[1]
     fig, axes = plt.subplots(1, n_dim, figsize=(3.4 * n_dim, 3.8), squeeze=False)
-    vmax = float(np.max(weights)) if np.max(weights) > 0 else 1.0
+    vmax = float(np.max(np.abs(weights))) if np.max(np.abs(weights)) > 0 else 1.0
     for d in range(n_dim):
         ax = axes[0, d]
         im, _ = mne.viz.plot_topomap(
@@ -134,7 +136,7 @@ def plot_topomap_grid(
             axes=ax,
             show=False,
             cmap=cmap,
-            vlim=(0.0, vmax),
+            vlim=(-vmax, vmax),
             contours=0,
             sensors=True,
         )
