@@ -111,6 +111,12 @@ def _try_hankel_aggregation(
     ``depth`` retardos).  Esta función reshapea a
     ``(n_basis, n_channels, depth)`` y promedia sobre el eje de
     retardos para obtener pesos a nivel de canal con su signo.
+
+    Si el número de features Hankel no coincide exactamente con
+    ``expected_n_channels * depth`` (p. ej. porque DMD aplicó
+    average-reference internamente y eliminó un canal), se intenta
+    inferir el número efectivo de canales como el divisor entero
+    más cercano de la dimensión Hankel.
     """
     stage1 = meta.get("stage1") if isinstance(meta, dict) else None
     if not isinstance(stage1, dict) or stage1.get("embedding") != "hankel":
@@ -129,6 +135,36 @@ def _try_hankel_aggregation(
         matrix = matrix.T
         r, c = c, r
     else:
+        # Flexible fallback: la dimensión Hankel puede no coincidir
+        # exactamente con expected_n_channels * depth si el método de
+        # stage2 modificó el número de canales (p. ej. DMD con
+        # average-reference + drop-last-channel).
+        # Se infiere el número efectivo de canales como el divisor
+        # entero más cercano.
+        resolved = False
+        for dim_size, needs_transpose in [(c, False), (r, True)]:
+            if dim_size % depth == 0 and dim_size // depth > 0:
+                n_eff_ch = dim_size // depth
+                if needs_transpose:
+                    matrix = matrix.T
+                    r, c = c, r
+                n_basis = r
+                try:
+                    aggregated = matrix.reshape(
+                        n_basis, n_eff_ch, depth
+                    ).mean(axis=2)
+                    if n_eff_ch != expected_n_channels:
+                        logger.info(
+                            "Hankel aggregation: effective channels (%d) != "
+                            "expected channels (%d); se usan %d filas de pesos.",
+                            n_eff_ch, expected_n_channels, n_eff_ch,
+                        )
+                    return (
+                        aggregated.T,
+                        f"hankel_aggregated(n_eff_ch={n_eff_ch})",
+                    )
+                except ValueError:
+                    continue
         return None, ""
 
     n_basis = r
