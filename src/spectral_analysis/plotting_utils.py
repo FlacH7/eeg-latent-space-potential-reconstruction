@@ -151,21 +151,35 @@ def plot_bar_influence(
     dim_labels: list[str],
     title: str = "Channel influence on latent space",
 ) -> plt.Figure:
-    """Barras horizontales por dimensión (fallback sin montaje topográfico)."""
+    """Barras horizontales por dimensión (fallback sin montaje topográfico).
+
+    Cada subplot se ordena independientemente.  Los pesos pueden ser
+    positivos o negativos (se usan colores distintos).
+    """
     weights = np.asarray(weights, dtype=float)
     n_dim = weights.shape[1]
-    height = max(3.0, 0.28 * len(ch_names) + 1.2)
+    n_ch = len(ch_names)
+    height = max(3.0, 0.28 * n_ch + 1.2)
     fig, axes = plt.subplots(
-        1, n_dim, figsize=(4.2 * n_dim, height), squeeze=False, sharey=True
+        1, n_dim, figsize=(4.2 * n_dim, height), squeeze=False, sharey=False
     )
-    fontsize = 6 if len(ch_names) > 32 else 8
+    fontsize = 6 if n_ch > 32 else 8
+    has_negative = bool(np.any(weights < 0))
     for d in range(n_dim):
         ax = axes[0, d]
         order = np.argsort(weights[:, d])
-        ax.barh(np.arange(len(ch_names)), weights[order, d], color="C0", alpha=0.85)
-        ax.set_yticks(np.arange(len(ch_names)))
+        vals = weights[order, d]
+        y_pos = np.arange(n_ch)
+        if has_negative:
+            colors = ["#d62728" if v < 0 else "#1f77b4" for v in vals]
+            ax.barh(y_pos, vals, color=colors, alpha=0.85)
+            ax.axvline(x=0, color="k", lw=0.6, ls="--")
+            ax.set_xlim(-1.05, 1.05)
+        else:
+            ax.barh(y_pos, vals, color="C0", alpha=0.85)
+            ax.set_xlim(0.0, 1.02)
+        ax.set_yticks(y_pos)
         ax.set_yticklabels([ch_names[i] for i in order], fontsize=fontsize)
-        ax.set_xlim(0.0, 1.02)
         ax.set_xlabel("Influence (norm.)")
         ax.set_title(dim_labels[d], fontsize=9)
         ax.grid(True, axis="x", alpha=0.3, lw=0.5)

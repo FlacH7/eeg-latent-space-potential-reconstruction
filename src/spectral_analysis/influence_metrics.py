@@ -208,7 +208,7 @@ def extract_linear_weights(
 def compute_channel_latent_correlation(
     data: np.ndarray, latent: np.ndarray
 ) -> np.ndarray:
-    """Fallback no lineal: |correlación de Pearson| canal–dimensión latente.
+    """Fallback no lineal: correlación de Pearson canal–dimensión latente.
 
     Parameters
     ----------
@@ -222,7 +222,8 @@ def compute_channel_latent_correlation(
     Returns
     -------
     weights:
-        Array ``(n_channels, n_dim)`` con valores en ``[0, 1]``.
+        Array ``(n_channels, n_dim)`` con valores en ``[-1, 1]``
+        (signo preservado; el llamante normaliza por máximo absoluto).
     """
     data = np.asarray(data, dtype=float)
     latent = np.asarray(latent, dtype=float)
@@ -245,7 +246,7 @@ def compute_channel_latent_correlation(
     z_data = _zscore_rows(segment)
     z_lat = _zscore_rows(latent.T)
     corr = (z_data @ z_lat.T) / n_samples
-    return np.abs(corr)
+    return corr
 
 
 def compute_spectral_influence(
