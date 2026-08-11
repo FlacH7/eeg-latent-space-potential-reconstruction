@@ -23,7 +23,7 @@
     {
       "label": "hankel+pca+markov_fastest",
       "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
+      "stage1_params": {},
       "stage2_dynamics": "pca",
       "stage2_params": {"n_components":20},
       "stage3_selection": "markov_fastest",
@@ -35,7 +35,7 @@
     {
       "label": "hankel+pca+markov_slowest",
       "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
+      "stage1_params": {},
       "stage2_dynamics": "pca",
       "stage2_params": {"n_components":20},
       "stage3_selection": "markov_slowest",
@@ -45,18 +45,63 @@
       }
     },
     {
-      "label": "hankel+pca+top_n",
+      "label": "hankel+dmd+top_n",
       "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
-      "stage2_dynamics": "pca",
-      "stage2_params": {"n_components":20},
+      "stage1_params": {},
+      "stage2_dynamics": "dmd",
+      "stage2_params": {},
       "stage3_selection": "top_n",
       "stage3_params": {}
     },
     {
       "label": "hankel+diffusion_maps+top_n",
       "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
+      "stage1_params": {},
+      "stage2_dynamics": "diffusion_maps",
+      "stage2_params": {
+        "svd_rank": 50,
+        "k": 100
+      },
+      "stage3_selection": "top_n",
+      "stage3_params": {}
+    },
+    {
+      "label": "none+pca+markov_fastest",
+      "stage1_embedding": null,
+      "stage1_params": {},
+      "stage2_dynamics": "pca",
+      "stage2_params": {"n_components":20},
+      "stage3_selection": "markov_fastest",
+      "stage3_params": {
+        "n_bins": 10,
+        "search_strategy": "exhaustive"
+      }
+    },
+    {
+      "label": "none+pca+markov_slowest",
+      "stage1_embedding": null,
+      "stage1_params": {},
+      "stage2_dynamics": "pca",
+      "stage2_params": {"n_components":20},
+      "stage3_selection": "markov_slowest",
+      "stage3_params": {
+        "n_bins": 10,
+        "search_strategy": "exhaustive"
+      }
+    },
+    {
+      "label": "none+dmd+top_n",
+      "stage1_embedding": null,
+      "stage1_params": {},
+      "stage2_dynamics": "dmd",
+      "stage2_params": {},
+      "stage3_selection": "top_n",
+      "stage3_params": {}
+    },
+    {
+      "label": "none+diffusion_maps+top_n",
+      "stage1_embedding": null,
+      "stage1_params": {},
       "stage2_dynamics": "diffusion_maps",
       "stage2_params": {
         "svd_rank": 50,
