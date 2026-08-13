@@ -612,7 +612,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # --- Hankel ---
     parser.add_argument(
-        "--hankel-depth", type=int, default=None,
+        "--hankel-depth", type=int, default=10,
         help="Profundidad Hankel. None = auto",
     )
 
