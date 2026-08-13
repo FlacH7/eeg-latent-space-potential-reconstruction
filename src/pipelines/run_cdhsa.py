@@ -5,30 +5,37 @@ src.pipelines.run_cdhsa - Orchestrator for the full CD-HSA pipeline
 Provides a high-level interface that runs all steps (A through D)
 with sensible defaults, plus a dataclass for configuration.
 
-Usage (programmatic, original API preserved)::
+Usage (programmatic, original API preserved)::::
 
     from src.pipelines.run_cdhsa import CDHSAConfig, run_cdhsa, CDHSAResult
     cfg = CDHSAConfig(fixed_rank=10, a6_n_null=100, bc_n_perm=5000)
     result = run_cdhsa(X, L, cfg)
     print(result.summary())
 
-Usage (CLI - builds Hankel matrices internally from EEG)::
+Usage (CLI - builds Hankel matrices from super-subjects)::::
 
+    # 60 subjects partidos en 3 super-sujetos de 20 cada uno
     python -m src.pipelines.run_cdhsa \\
         --session session1 \\
         --tasks eyesclosed eyesopen \\
-        --subjects 1 2 3 4 5 \\
+        --n-super-subjects 3 \\
+        --total-subjects 60 \\
         --t-start 0 --t-end 300 \\
         --L 10 \\
         --l-freq 1.0 --h-freq 40.0 \\
         --hankel-depth 250 \\
         --fixed-rank 10 --a6-n-null 100 --bc-n-perm 5000
 
-Pipeline interno hasta las matrices de Hankel
------------------------------------------------
-Para cada par (sujeto, condicion)::
+Pipeline interno
+-----------------
+Se particionan los ``total_subjects`` sujetos en ``n_super_subjects``
+super-sujetos de tamano ``total_subjects // n_super_subjects`` cada uno.
+Cada super-sujeto es la concatenacion temporal de sus sujetos
+individuales (via ``load_super_subject_eeg``).
 
-    1. Cargar EEG bruto         -> load_test_retest_gedai_eeg_from_ids()
+Para cada par (super-sujeto, condicion)::::
+
+    1. Cargar y concatenar EEG  -> load_super_subject_eeg()
     2. Filtro pasa-banda        -> extract_filtered_data_matrix()
        (X_filtered: n_channels x n_times, centrada a media cero)
     3. Matriz de Hankel         -> _build_multivariate_hankel()
@@ -38,17 +45,19 @@ Para cada par (sujeto, condicion)::
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 
 # =====================================================================
-# CDHSAConfig - sin cambios
+# CDHSAConfig
 # =====================================================================
 
 @dataclass
@@ -89,7 +98,7 @@ class CDHSAConfig:
 
 
 # =====================================================================
-# CDHSAResult - sin cambios
+# CDHSAResult
 # =====================================================================
 
 class CDHSAResult:
@@ -124,8 +133,10 @@ class CDHSAResult:
                 sig_e = "*" if self.BC['sig_energy_maxF'][k] else ""
                 sig_g = "*" if self.BC['sig_geometry_maxF'][k] else ""
                 lines.append(
-                    f"    {name}: energy_F={self.BC['summary']['energy_F'][k]:.2f}"
-                    f"{sig_e}  geom_F={self.BC['summary']['geometry_F'][k]:.2f}"
+                    f"    {name}: energy_F="
+                    f"{self.BC['summary']['energy_F'][k]:.2f}"
+                    f"{sig_e}  geom_F="
+                    f"{self.BC['summary']['geometry_F'][k]:.2f}"
                     f"{sig_g}"
                 )
         if self.G is not None:
@@ -149,7 +160,7 @@ class CDHSAResult:
 
 
 # =====================================================================
-# run_cdhsa - sin cambios
+# run_cdhsa (original)
 # =====================================================================
 
 def run_cdhsa(
@@ -193,7 +204,8 @@ def run_cdhsa(
         prevalence_quantile=config.prevalence_quantile,
     )
 
-    a6_max = config.a6_max_common if config.a6_max_common > 0 else min(20, len(R['lambda_']))
+    a6_max = (config.a6_max_common if config.a6_max_common > 0
+             else min(20, len(R['lambda_'])))
     A6 = cdhsa_A6_common_rank(R, opts={
         'max_common': a6_max,
         'n_folds': config.a6_n_folds,
@@ -242,14 +254,16 @@ def run_cdhsa(
 
 
 # =====================================================================
-# Construccion de matrices de Hankel desde EEG
+# Construccion de matrices de Hankel desde super-sujetos EEG
 # =====================================================================
 
 def build_hankel_from_eeg(
     *,
     session: str,
     tasks: list[str],
-    subject_ids: list[int],
+    n_super_subjects: int,
+    total_subjects: int = 60,
+    subject_start_offset: int = 1,
     db_path: str | Path | None = None,
     t_start: float | None = None,
     t_stop: float | None = None,
@@ -258,39 +272,31 @@ def build_hankel_from_eeg(
     hankel_depth: int | None = None,
     verbose: bool | str | None = None,
 ) -> tuple[list[list[NDArray[np.floating]]], dict]:
-    """Construir las matrices de Hankel para cada par (sujeto, condicion).
+    """Construir matrices de Hankel para cada par (super-sujeto, condicion).
 
-    Pipeline interno (reproducido del pipeline de latent-space extraction):
+    Particiona ``total_subjects`` en ``n_super_subjects`` super-sujetos
+    de tamano ``total_subjects // n_super_subjects``.  Cada super-sujeto
+    es la concatenacion temporal de sus sujetos individuales.
 
-        1. Cargar EEG bruto (por sujeto individual)
-           -> load_test_retest_gedai_eeg_from_ids()
-        2. Filtro pasa-banda (l_freq, h_freq)
-           -> extract_filtered_data_matrix()
-           Resultado: X_filtered de forma (n_channels, n_times), centrada.
-        3. Matriz de Hankel bloque-multivariada
-           -> _build_multivariate_hankel(X_filtered, depth)
-           Resultado: H de forma (n_channels * depth, n_times - depth + 1)
+    Pipeline por (super-sujeto, condicion)::::
 
-    Parameters
-    ----------
-    session : str
-    tasks : list of str
-    subject_ids : list of int
-    db_path : str or Path or None
-    t_start, t_stop : float or None
-    l_freq, h_freq : float
-    hankel_depth : int or None
-        None -> auto: clip(sfreq * 0.25, 50, 200) capped at n_times // 10.
-    verbose : bool or str or None
+        1. Cargar y concatenar EEG -> load_super_subject_eeg()
+           (carga N sujetos, armoniza canales, concatena en tiempo)
+        2. Filtro pasa-banda -> extract_filtered_data_matrix()
+           X_filtered: (n_channels, n_times), centrada a media cero
+        3. Matriz de Hankel -> _build_multivariate_hankel()
+           H: (n_channels * depth, n_times - depth + 1)
 
     Returns
     -------
     X : list[list[NDArray]]
-        X[s][c] = Hankel matrix (p, T_samples) para sujeto s, condicion c.
+        X[s][c] = Hankel para super-sujeto s, condicion c.
     info : dict
+        Metadata completa de la construccion.
     """
-    from src.latent_space_extraction.test_retest_gedai_eeg import (
-        load_test_retest_gedai_eeg_from_ids,
+    from src.latent_space_extraction.super_subject_eeg import (
+        load_super_subject_eeg,
+        resolve_super_subject_subject_ids,
     )
     from src.latent_space_extraction.eeg_preprocessing import (
         extract_filtered_data_matrix,
@@ -300,7 +306,6 @@ def build_hankel_from_eeg(
         _auto_embedding_depth,
     )
 
-    # Resolver db_path
     if db_path is None:
         try:
             from src.utils.config import DB_TEST_RETEST_GEDAI_PATH
@@ -311,8 +316,24 @@ def build_hankel_from_eeg(
                 "no define DB_TEST_RETEST_GEDAI_PATH."
             )
 
-    S = len(subject_ids)
+    if total_subjects % n_super_subjects != 0:
+        raise ValueError(
+            f"total_subjects ({total_subjects}) no es divisible "
+            f"por n_super_subjects ({n_super_subjects})."
+        )
+    subjects_per = total_subjects // n_super_subjects
+
+    S = n_super_subjects
     C = len(tasks)
+
+    print(f"  Particion: {total_subjects} subjects -> "
+          f"{S} super-sujetos de {subjects_per} cada uno")
+    print(f"  Super-sujeto 1 = subs {subject_start_offset}"
+          f"..{subject_start_offset + subjects_per - 1}")
+    print(f"  Super-sujeto {S} = subs "
+          f"{subject_start_offset + (S-1)*subjects_per}"
+          f"..{subject_start_offset + S*subjects_per - 1}")
+    print()
 
     X: list[list[NDArray[np.floating]]] = []
     shapes: list[list[tuple[int, int] | None]] = []
@@ -321,25 +342,39 @@ def build_hankel_from_eeg(
     n_channels_list: list[int] = []
     n_times_filtered_list: list[int] = []
     skipped: list[tuple[int, int, str]] = []
+    super_subject_ids_list: list[list[int]] = []
+    durations: list[float] = []
 
     t0_global = time.time()
 
-    for s_idx, subj_id in enumerate(subject_ids):
-        subject_label = f"sub-{subj_id:02d}"
+    for ss_id in range(1, S + 1):
+        ss_label = f"super_subject-{ss_id:02d}"
         X_s: list[NDArray[np.floating]] = []
         shapes_s: list[tuple[int, int] | None] = []
 
+        # Resolver que sujetos componen este super-sujeto
+        member_ids = resolve_super_subject_subject_ids(
+            super_subject_id=ss_id,
+            subjects_per_super_subject=subjects_per,
+            subject_start_offset=subject_start_offset,
+        )
+        super_subject_ids_list.append(member_ids)
+
         for c_idx, task in enumerate(tasks):
-            tag = f"[{s_idx + 1}/{S}] {subject_label}/{session}/{task}"
+            tag = (f"[{ss_id}/{S}] {ss_label} "
+                   f"(subs {member_ids[0]}..{member_ids[-1]})"
+                   f"/{session}/{task}")
             print(f"  {tag} ...", end=" ")
             sys.stdout.flush()
 
-            # --- Paso 1: Cargar EEG bruto del sujeto individual ---
+            # --- Paso 1: Cargar y concatenar super-sujeto ---
             try:
-                raw = load_test_retest_gedai_eeg_from_ids(
-                    subject=subject_label,
+                raw = load_super_subject_eeg(
+                    super_subject_id=ss_id,
                     session=session,
                     task=task,
+                    subjects_per_super_subject=subjects_per,
+                    subject_start_offset=subject_start_offset,
                     db_path=db_path,
                     t_start=t_start,
                     t_stop=t_stop,
@@ -350,10 +385,12 @@ def build_hankel_from_eeg(
                 print(f"SKIP ({exc})")
                 X_s.append(np.empty((0, 0)))
                 shapes_s.append(None)
-                skipped.append((s_idx, c_idx, str(exc)))
+                skipped.append((ss_id - 1, c_idx, str(exc)))
                 continue
 
             sfreq = float(raw.info["sfreq"])
+            duration_s = raw.times[-1]
+            n_ch_raw = len(raw.ch_names)
 
             # --- Paso 2: Filtro pasa-banda ---
             X_filtered, _raw_filt, sfreq = extract_filtered_data_matrix(
@@ -371,7 +408,7 @@ def build_hankel_from_eeg(
                 print(f"SKIP (depth={depth} >= n_times={n_times})")
                 X_s.append(np.empty((0, 0)))
                 shapes_s.append(None)
-                skipped.append((s_idx, c_idx,
+                skipped.append((ss_id - 1, c_idx,
                     f"depth={depth} >= n_times={n_times}"))
                 continue
 
@@ -383,8 +420,10 @@ def build_hankel_from_eeg(
             depths_used.append(depth)
             n_channels_list.append(n_ch)
             n_times_filtered_list.append(n_times)
+            durations.append(duration_s)
 
             print(f"OK  ch={n_ch} T_raw={n_times} "
+                  f"dur={duration_s:.0f}s "
                   f"depth={depth} -> H={H.shape}")
             sys.stdout.flush()
 
@@ -396,7 +435,11 @@ def build_hankel_from_eeg(
     info = {
         "session": session,
         "tasks": tasks,
-        "subject_ids": subject_ids,
+        "n_super_subjects": S,
+        "total_subjects": total_subjects,
+        "subjects_per_super_subject": subjects_per,
+        "subject_start_offset": subject_start_offset,
+        "super_subject_ids": super_subject_ids_list,
         "S": S,
         "C": C,
         "l_freq": l_freq,
@@ -407,17 +450,19 @@ def build_hankel_from_eeg(
         "depths_used": depths_used,
         "n_channels": n_channels_list,
         "n_times_filtered": n_times_filtered_list,
+        "durations": durations,
         "skipped": skipped,
         "elapsed_build": elapsed,
     }
     if sfreqs:
-        info["sfreq_common"] = sfreqs[0] if len(set(sfreqs)) == 1 else None
-        info["depth_common"] = (
-            depths_used[0] if len(set(depths_used)) == 1 else None
-        )
-        info["n_channels_common"] = (
-            n_channels_list[0] if len(set(n_channels_list)) == 1 else None
-        )
+        info["sfreq_common"] = (sfreqs[0] if len(set(sfreqs)) == 1
+                                 else None)
+        info["depth_common"] = (depths_used[0]
+                                if len(set(depths_used)) == 1
+                                else None)
+        info["n_channels_common"] = (n_channels_list[0]
+                                     if len(set(n_channels_list)) == 1
+                                     else None)
 
     return X, info
 
@@ -426,13 +471,10 @@ def characterize_hankel_matrices(
     X: list[list[NDArray[np.floating]]],
     info: dict,
 ) -> str:
-    """Resumen legible de las matrices de Hankel construidas.
+    """Resumen de las matrices de Hankel construidas.
 
-    Para cada par (sujeto, condicion) valido calcula:
-    - Forma (p, T_samples)
-    - Rango numerico (SVD parcial, k=min(p,T,50))
-    - Ratio de compresion p/rank
-    - Top-5 valores singulares
+    Para cada (super-sujeto, condicion) valido calcula:
+    - Forma, rango numerico (SVD parcial), compresion, top-5 sing.vals
     """
     lines = []
     lines.append("")
@@ -443,9 +485,11 @@ def characterize_hankel_matrices(
     S = info["S"]
     C = info["C"]
     tasks = info["tasks"]
-    subject_ids = info["subject_ids"]
+    subs_per = info["subjects_per_super_subject"]
 
-    lines.append(f"  Sujetos           : {S}")
+    lines.append(f"  Super-sujetos     : {S} "
+                 f"({subs_per} subjects cada uno)")
+    lines.append(f"  Total subjects    : {info['total_subjects']}")
     lines.append(f"  Condiciones       : {C}  ({', '.join(tasks)})")
     lines.append(f"  Filtro            : {info['l_freq']}-{info['h_freq']} Hz")
     lines.append(f"  Depth pedido      : {info['hankel_depth_requested']}")
@@ -458,52 +502,52 @@ def characterize_hankel_matrices(
     lines.append(f"  Saltados          : {len(info['skipped'])}")
     lines.append(f"  Tiempo construccion: {info['elapsed_build']:.1f} s")
 
-    header = (f"  {'Sujeto':<12} {'Cond':<15} {'Forma H':<30} "
-              f"{'Rank':>8} {'Compres.':>10}  {'Top-5 sing.vals'}")
+    header = (f"  {'SS':<6} {'Miembros':<20} {'Cond':<15} "
+              f"{'Forma H':<28} {'Rank':>6} {'Comp.':>8}  "
+              f"{'Top-5 sing.vals'}")
     lines.append("")
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
 
     n_valid = 0
     for s in range(S):
+        member_ids = info["super_subject_ids"][s]
+        members_str = f"{member_ids[0]}..{member_ids[-1]}"
+        ss_label = f"SS-{s+1}"
+
         for c in range(C):
             H = X[s][c]
-            subj_label = f"sub-{subject_ids[s]:02d}"
             if H.size == 0:
                 lines.append(
-                    f"  {subj_label:<12} {tasks[c]:<15} {"(vacio)":<30}"
+                    f"  {ss_label:<6} {members_str:<20} "
+                    f"{tasks[c]:<15} {'(vacio)':<28}"
                 )
                 continue
+
             n_valid += 1
             p, T_samples = H.shape
 
             k_svd = min(p, T_samples, 50)
             try:
                 from scipy.sparse.linalg import svds
-                svals = svds(H, k=k_svd, return_singular_vectors=False)
+                svals = svds(H, k=k_svd,
+                             return_singular_vectors=False)
                 svals = np.sort(svals)[::-1]
                 rank_est = int(np.sum(svals > svals[0] * 1e-6))
             except Exception:
                 rank_est = -1
                 svals = np.array([])
 
-            comp = p / rank_est if rank_est > 0 else float("inf")
+            comp = (p / rank_est if rank_est > 0 else float("inf"))
             top5 = ", ".join(f"{v:.1f}" for v in svals[:5])
             lines.append(
-                f"  {subj_label:<12} {tasks[c]:<15} {str(H.shape):<30} "
-                f"{rank_est:>8} {comp:>9.2f}x  {top5}"
+                f"  {ss_label:<6} {members_str:<20} "
+                f"{tasks[c]:<15} {str(H.shape):<28} "
+                f"{rank_est:>6} {comp:>7.2f}x  {top5}"
             )
 
     lines.append("")
     lines.append(f"  Total matrices validas: {n_valid} / {S * C}")
-    if info.get("sfreq_common") is not None:
-        lines.append(f"  sfreq consistente   : SI")
-    else:
-        lines.append("  sfreq consistente   : NO")
-    if info.get("depth_common") is not None:
-        lines.append(f"  Depth consistente   : SI")
-    else:
-        lines.append(f"  Depth consistente   : NO")
 
     return "\n".join(lines)
 
@@ -515,69 +559,259 @@ def characterize_hankel_matrices(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "CD-HSA: construye matrices de Hankel desde EEG del "
-            "dataset Gedai y ejecuta el analisis CD-HSA."
+            "CD-HSA: construye matrices de Hankel desde super-sujetos "
+            "del dataset Gedai y ejecuta el analisis CD-HSA."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # --- Fuente de datos ---
-    parser.add_argument("--session", type=str, required=True,
-                        help="Session ID (ej: session1)")
-    parser.add_argument("--tasks", type=str, nargs="+", required=True,
-                        help="Condiciones/tareas (ej: eyesclosed eyesopen)")
-    parser.add_argument("--subjects", type=int, nargs="+", required=True,
-                        help="Indices de sujetos (ej: 1 2 3 ... 20)")
-    parser.add_argument("--db-path", type=str, default=None,
-                        help="Raiz del dataset Gedai")
-    parser.add_argument("--t-start", type=float, default=None,
-                        help="Inicio del segmento (s)")
-    parser.add_argument("--t-end", type=float, default=None,
-                        help="Fin del segmento (s)")
+    # --- Fuente de datos (super-sujetos) ---
+    parser.add_argument(
+        "--session", type=str, required=True,
+        help="Session ID (ej: session1)",
+    )
+    parser.add_argument(
+        "--tasks", type=str, nargs="+", required=True,
+        help="Condiciones/tareas (ej: eyesclosed eyesopen)",
+    )
+    parser.add_argument(
+        "--n-super-subjects", type=int, required=True,
+        help=("Cantidad de super-sujetos a armar. "
+              "Los total_subjects se reparten equitativamente "
+              "(ej: 60/3 = 20 subjects por super-sujeto)."),
+    )
+    parser.add_argument(
+        "--total-subjects", type=int, default=60,
+        help="Total de sujetos individuales disponibles. Default: 60",
+    )
+    parser.add_argument(
+        "--subject-start-offset", type=int, default=1,
+        help="Indice del primer sujeto. Default: 1",
+    )
+    parser.add_argument(
+        "--db-path", type=str, default=None,
+        help="Raiz del dataset Gedai",
+    )
+    parser.add_argument("--t-start", type=float, default=None)
+    parser.add_argument("--t-end", type=float, default=None)
+    parser.add_argument(
+        "--out-dir", type=str, default=None,
+        help=("Directorio raiz para guardar resultados. "
+              "Default: BASE_RESULTS_PATH de src.utils.config"),
+    )
 
     # --- CDHSA ---
-    parser.add_argument("--L", type=int, required=True,
-                        help="Dimension del subespacio para CD-HSA")
+    parser.add_argument(
+        "--L", type=int, required=True,
+        help="Dimension del subespacio para CD-HSA",
+    )
 
     # --- Preprocesamiento ---
-    parser.add_argument("--l-freq", type=float, default=1.0,
-                        help="Corte inferior del filtro (Hz). Default: 1.0")
-    parser.add_argument("--h-freq", type=float, default=40.0,
-                        help="Corte superior del filtro (Hz). Default: 40.0")
+    parser.add_argument("--l-freq", type=float, default=1.0)
+    parser.add_argument("--h-freq", type=float, default=40.0)
 
     # --- Hankel ---
-    parser.add_argument("--hankel-depth", type=int, default=10,
-                        help="Profundidad Hankel. None = auto")
+    parser.add_argument(
+        "--hankel-depth", type=int, default=None,
+        help="Profundidad Hankel. None = auto",
+    )
 
     # --- Config CDHSA ---
-    g_cdhsa = parser.add_argument_group("Parametros CDHSA (Steps A-D)")
-    g_cdhsa.add_argument("--fixed-rank", type=int, default=20)
-    g_cdhsa.add_argument("--rank-method", type=str, default="reproducibility",
-                         choices=["fixed", "reproducibility"])
-    g_cdhsa.add_argument("--a6-n-null", type=int, default=500)
-    g_cdhsa.add_argument("--bc-n-perm", type=int, default=5000)
-    g_cdhsa.add_argument("--skip-bc", action="store_true")
-    g_cdhsa.add_argument("--skip-tangent", action="store_true")
-    g_cdhsa.add_argument("--skip-d", action="store_true")
+    g = parser.add_argument_group("Parametros CDHSA")
+    g.add_argument("--fixed-rank", type=int, default=10)
+    g.add_argument("--rank-method", type=str, default="fixed",
+                   choices=["fixed", "reproducibility"])
+    g.add_argument("--a6-n-null", type=int, default=100)
+    g.add_argument("--bc-n-perm", type=int, default=5000)
+    g.add_argument("--skip-bc", action="store_true")
+    g.add_argument("--skip-tangent", action="store_true")
+    g.add_argument("--skip-d", action="store_true")
 
     parser.add_argument("--verbose", action="store_true", default=True)
+    parser.add_argument(
+        "--no-save", action="store_true",
+        help="No guardar resultados a disco (solo imprimir)",
+    )
 
     return parser.parse_args(argv)
+
+
+# =====================================================================
+# Guardado de resultados
+# =====================================================================
+
+def _json_safe(obj: Any) -> Any:
+    """Convertir un obj a algo serializable por json."""
+    if isinstance(obj, np.ndarray):
+        return {"__ndarray__": True, "shape": list(obj.shape),
+                "dtype": str(obj.dtype)}
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+def _resolve_out_dir(args: argparse.Namespace) -> Path:
+    """Resolver el directorio de salida y crear la subcarpeta.
+
+    Estructura::
+
+        {BASE_RESULTS_PATH}/cdhsa/{session}/
+            nSS{n}_L{L}_fr{fr}_a6n{a6}_bcn{bc}/
+            {l_freq}-{h_freq}Hz_depth{d}/
+    """
+    base = args.out_dir
+    if base is None:
+        try:
+            from src.utils.config import BASE_RESULTS_PATH
+            base = str(BASE_RESULTS_PATH)
+        except ImportError:
+            raise ValueError(
+                "--out-dir es obligatorio si src.utils.config "
+                "no define BASE_RESULTS_PATH."
+            )
+
+    t_start_tag = f"{args.t_start}s" if args.t_start is not None else "any"
+    t_end_tag = f"{args.t_end}s" if args.t_end is not None else "any"
+
+    out_dir = Path(
+        f"{base}/cdhsa/{args.session}"
+        f"/nSS{args.n_super_subjects}_L{args.L}"
+        f"_fr{args.fixed_rank}_a6n{args.a6_n_null}_bcn{args.bc_n_perm}"
+        f"/{args.l_freq}-{args.h_freq}Hz"
+        f"_depth{args.hankel_depth or 'auto'}"
+        f"/from{t_start_tag}_to{t_end_tag}"
+        f"_{'_'.join(args.tasks)}"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def save_results(
+    out_dir: Path,
+    X: list[list[NDArray[np.floating]]],
+    hankel_info: dict,
+    characterization: str,
+    result: CDHSAResult,
+    cfg: CDHSAConfig,
+    L: int,
+) -> None:
+    """Guardar todos los resultados en out_dir.
+
+    Archivos creados::
+
+        hankel_info.json       Metadata de construccion de Hankel
+        config.json            Configuracion CDHSA usada
+        characterization.txt   Tabla de caracterizacion de matrices
+        cdhsa_summary.txt      Resumen textual del CD-HSA
+        hankel_matrices.npz    Matrices de Hankel (X[s][c])
+        cdhsa_arrays.npz       Arrays numericos del resultado CD-HSA
+    """
+    print(f"\n  Guardando resultados en: {out_dir}")
+    sys.stdout.flush()
+
+    # --- 1. hankel_info.json ---
+    hankel_info_json = _json_safe(hankel_info)
+    with open(out_dir / "hankel_info.json", "w") as f:
+        json.dump(hankel_info_json, f, indent=2, default=str)
+    print("    [OK] hankel_info.json")
+
+    # --- 2. config.json ---
+    cfg_dict = _json_safe(asdict(cfg))
+    cfg_dict["L"] = L
+    with open(out_dir / "config.json", "w") as f:
+        json.dump(cfg_dict, f, indent=2)
+    print("    [OK] config.json")
+
+    # --- 3. characterization.txt ---
+    with open(out_dir / "characterization.txt", "w") as f:
+        f.write(characterization)
+    print("    [OK] characterization.txt")
+
+    # --- 4. cdhsa_summary.txt ---
+    summary_text = result.summary()
+    with open(out_dir / "cdhsa_summary.txt", "w") as f:
+        f.write(summary_text)
+    print("    [OK] cdhsa_summary.txt")
+
+    # --- 5. hankel_matrices.npz ---
+    save_dict: dict[str, NDArray] = {}
+    for s in range(len(X)):
+        for c in range(len(X[s])):
+            key = f"H_ss{s+1}_c{c+1}"
+            H = X[s][c]
+            if H.size > 0:
+                save_dict[key] = H
+            else:
+                save_dict[key] = np.array([])
+    np.savez_compressed(out_dir / "hankel_matrices.npz", **save_dict)
+    print(f"    [OK] hankel_matrices.npz  ({len(save_dict)} matrices)")
+
+    # --- 6. cdhsa_arrays.npz ---
+    arrays_dict: dict[str, NDArray] = {}
+    _save_result_arrays(result.R, "R", arrays_dict)
+    if result.A6 is not None:
+        _save_result_arrays(result.A6, "A6", arrays_dict)
+    if result.BC is not None:
+        _save_result_arrays(result.BC, "BC", arrays_dict)
+    if result.G is not None:
+        _save_result_arrays(result.G, "G", arrays_dict)
+    if result.D is not None:
+        _save_result_arrays(result.D, "D", arrays_dict)
+    np.savez_compressed(out_dir / "cdhsa_arrays.npz", **arrays_dict)
+    print(f"    [OK] cdhsa_arrays.npz  ({len(arrays_dict)} arrays)")
+
+    print(f"  Listo. {len(list(out_dir.iterdir()))} archivos en {out_dir}")
+
+
+def _save_result_arrays(
+    d: dict, prefix: str, out: dict[str, NDArray]
+) -> None:
+    """Extraer arrays numericos de un dict de resultados y meterlos en out."""
+    for k, v in d.items():
+        key = f"{prefix}__{k}"
+        if isinstance(v, np.ndarray):
+            out[key] = v
+        elif isinstance(v, dict):
+            _save_result_arrays(v, key, out)
+        elif isinstance(v, (list, tuple)) and len(v) > 0:
+            # Intentar convertir lista de arrays a stack
+            try:
+                arr = np.array(v)
+                if arr.dtype.kind in ("f", "i", "u", "b"):
+                    out[key] = arr
+            except (ValueError, TypeError):
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     verbose = "INFO" if args.verbose else None
 
-    # 1. Construir matrices de Hankel
+    # 0. Resolver directorio de salida
+    if not args.no_save:
+        out_dir = _resolve_out_dir(args)
+    else:
+        out_dir = None
+
+    # 1. Construir matrices de Hankel desde super-sujetos
     print("=" * 70)
-    print("  CONSTRUYENDO MATRICES DE HANKEL DESDE EEG")
+    print("  CONSTRUYENDO MATRICES DE HANKEL DESDE SUPER-SUJETOS")
     print("=" * 70)
 
     X, hankel_info = build_hankel_from_eeg(
         session=args.session,
         tasks=args.tasks,
-        subject_ids=args.subjects,
+        n_super_subjects=args.n_super_subjects,
+        total_subjects=args.total_subjects,
+        subject_start_offset=args.subject_start_offset,
         db_path=args.db_path,
         t_start=args.t_start,
         t_stop=args.t_end,
@@ -588,7 +822,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # 2. Caracterizar
-    print(characterize_hankel_matrices(X, hankel_info))
+    characterization = characterize_hankel_matrices(X, hankel_info)
+    print(characterization)
 
     n_valid = sum(
         1 for s in range(len(X)) for c in range(len(X[s]))
@@ -613,10 +848,15 @@ def main(argv: list[str] | None = None) -> int:
     print("\n" + "=" * 70)
     print("  EJECUTANDO CD-HSA")
     print("=" * 70)
-    print(f"  L (subespacio)  : {args.L}")
-    print(f"  fixed_rank      : {cfg.fixed_rank}")
-    print(f"  a6_n_null       : {cfg.a6_n_null}")
-    print(f"  bc_n_perm       : {cfg.bc_n_perm}")
+    print(f"  L (subespacio)        : {args.L}")
+    print(f"  Super-sujetos (S)     : {args.n_super_subjects}")
+    print(f"  Subjects por SS       : {args.total_subjects // args.n_super_subjects}")
+    print(f"  Condiciones (C)       : {len(args.tasks)}")
+    print(f"  fixed_rank            : {cfg.fixed_rank}")
+    print(f"  a6_n_null             : {cfg.a6_n_null}")
+    print(f"  bc_n_perm             : {cfg.bc_n_perm}")
+    if out_dir is not None:
+        print(f"  Out dir               : {out_dir}")
     print("")
     sys.stdout.flush()
 
@@ -625,6 +865,18 @@ def main(argv: list[str] | None = None) -> int:
     # 4. Resultados
     print("")
     print(result.summary())
+
+    # 5. Guardar
+    if out_dir is not None:
+        save_results(
+            out_dir=out_dir,
+            X=X,
+            hankel_info=hankel_info,
+            characterization=characterization,
+            result=result,
+            cfg=cfg,
+            L=args.L,
+        )
 
     return 0
 
