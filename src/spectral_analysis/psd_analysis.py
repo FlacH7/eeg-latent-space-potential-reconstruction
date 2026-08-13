@@ -481,7 +481,8 @@ def compute_channel_influence_on_latent(
     ``meta`` (PCA ``components_``, modos DMD, matriz ICA; ver
     :mod:`.influence_metrics`). Para métodos no lineales (p. ej.
     Diffusion Maps) se usa como fallback la correlación canal–latente.
-    Los pesos se normalizan por dimensión (valor absoluto, máximo = 1).
+    Los pesos se normalizan por dimensión (máximo |valor| = 1, signo
+    preservado: valores en [-1, 1]).
 
     Visualización: topoplots si ``raw`` tiene montaje topográfico;
     barras horizontales en caso contrario (p. ej. datos CSV/Ludovico).
@@ -496,7 +497,8 @@ def compute_channel_influence_on_latent(
     Returns
     -------
     (influence_weights, ch_names, fig_path, data_path):
-        ``influence_weights``: ``(n_channels, n_dim)`` en ``[0, 1]``.
+        ``influence_weights``: ``(n_channels, n_dim)`` en ``[-1, 1]``
+        (signo preservado).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -538,12 +540,15 @@ def compute_channel_influence_on_latent(
 
     ch_names = _resolve_channel_names(raw, meta, weights.shape[0])
 
-    # Normalización por dimensión: valor absoluto y máximo = 1.
-    weights = np.abs(np.asarray(weights, dtype=float))
-    col_max = weights.max(axis=0, keepdims=True)
+    # Normalización por dimensión: máximo |valor| = 1, signo preservado.
+    # (Antes se aplicaba np.abs() aquí, lo que hacía que TODAS las barras
+    # salieran positivas con cualquier método; los pesos firmados son
+    # interpretables en signo relativo entre canales de una misma dimensión.)
+    weights = np.asarray(weights, dtype=float)
+    col_max = np.abs(weights).max(axis=0, keepdims=True)
     col_max[col_max == 0.0] = 1.0
     weights = weights / col_max
-    method += "|abs_maxnorm"
+    method += "|maxabs_norm"
 
     # 2. Métrica espectral de influencia (opcional, §4.3.3).
     spectral: dict | None = None

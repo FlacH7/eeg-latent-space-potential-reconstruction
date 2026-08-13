@@ -738,12 +738,17 @@ class SuperSubjectBatchRunner:
 
         t0 = time.time()
         try:
+            # --- FIX: desactivar buffering del subprocess para logs en tiempo real ---
+            child_env = os.environ.copy()
+            child_env["PYTHONUNBUFFERED"] = "1"
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 cwd=_PROJECT_ROOT,
+                env=child_env,
             )
 
             for line in proc.stdout:

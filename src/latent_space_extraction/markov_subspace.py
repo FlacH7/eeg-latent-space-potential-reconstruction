@@ -22,6 +22,7 @@ References
 
 from __future__ import annotations
 
+import sys
 import time
 from itertools import combinations
 from multiprocessing import Pool
@@ -251,8 +252,10 @@ def find_best_subspace_markov(
         raise ValueError(f"N={N} cannot exceed D={D}")
 
     print(f"[MarkovTime] Discretising {D} components into {n_bins} bins...")
+    sys.stdout.flush()
     bins_idx = discretize_series(data, n_bins)
     print("[MarkovTime] Discretisation done.")
+    sys.stdout.flush()
 
     all_combs = list(combinations(range(D), N))
     n_combs = len(all_combs)
@@ -260,6 +263,7 @@ def find_best_subspace_markov(
     print(
         f"[MarkovTime] Evaluating {n_combs:,} combinations of {N} components..."
     )
+    sys.stdout.flush()
 
     args_list = [(comb, bins_idx, n_bins) for comb in all_combs]
 
@@ -274,15 +278,23 @@ def find_best_subspace_markov(
         )
         for a in it:
             results.append(_evaluate_markov_worker(a))
+        sys.stdout.flush()
     else:
+        print(f"[MarkovTime] Using {n_workers} parallel workers...")
+        sys.stdout.flush()
         with Pool(processes=n_workers) as pool:
             it = pool.imap_unordered(_evaluate_markov_worker, args_list)
             if show_progress:
                 it = tqdm(it, total=n_combs, desc="MarkovTime")
             results = list(it)
+            # FIX: tqdm 100% no significa que list() terminó — el pool
+            # puede estar haciendo join/cleanup de worker processes.
+            print("[MarkovTime] All workers finished. Collecting results...")
+            sys.stdout.flush()
 
     elapsed = time.time() - start
     print(f"[MarkovTime] Done in {elapsed:.2f} s.")
+    sys.stdout.flush()
 
     best_comb: tuple[int, ...] | None = None
     best_tau = -np.inf if maximize else np.inf

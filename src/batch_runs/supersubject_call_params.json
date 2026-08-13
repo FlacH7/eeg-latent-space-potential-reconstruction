@@ -11,7 +11,7 @@
 
   "sessions": ["session1"],
 
-  "tasks": ["eyesclosed", "eyesopen","music"],
+  "tasks": ["eyesclosed","music"],
 
   "time_window": {
     "t_start": 0.0,
@@ -21,39 +21,20 @@
 
   "methods": [
     {
-      "label": "hankel+pca_ica+markov_fastest",
+      "label": "hankel+pca+top_2",
       "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 60},
-      "stage2_dynamics": "pca_ica",
+      "stage1_params": {"depth": 10},
+      "stage2_dynamics": "pca",
       "stage2_params": {
-        "ica_method": "picard",
         "n_components": 20
       },
-      "stage3_selection": "markov_fastest",
-      "stage3_params": {
-        "n_bins": 10,
-        "search_strategy": "exhaustive"
-      }
-    },
-    {
-      "label": "hankel+pca_ica+markov_slowest",
-      "stage1_embedding": "hankel",
-      "stage1_params": {},
-      "stage2_dynamics": "pca_ica",
-      "stage2_params": {
-        "ica_method": "picard",
-        "n_components": 20
-      },
-      "stage3_selection": "markov_slowest",
-      "stage3_params": {
-        "n_bins": 10,
-        "search_strategy": "exhaustive"
-      }
+      "stage3_selection": "top_n",
+      "stage3_params": {}
     }
   ],
 
   "shared_params": {
-    "latent_dim": 2,
+    "latent_dim": 4,
     "l_freq": 1.0,
     "h_freq": 40.0,
     "ica_method": "picard",
@@ -72,7 +53,7 @@
     "n_bins": 10,
     "workers": null,
     "search_strategy": "exhaustive",
-    "km_bins": 40
+    "km_bins": 10
   },
 
   "execution": {

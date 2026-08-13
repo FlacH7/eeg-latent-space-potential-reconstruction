@@ -2043,7 +2043,7 @@ def plot_potential_slice(U, edges, dims=(0, 1), fixed_coords=None,
     y = edges[j].copy()
     if crop_to_valid:
         x0, x1, y0, y1 = _valid_bbox(U_slice)
-        U_slice, x, y = _crop_to_valid(U_slice, [x, y])
+        U_slice, (x, y) = _crop_to_valid(U_slice, [x, y])
         if g1 is not None:
             g1 = g1[x0:x1, y0:y1]
             g2 = g2[x0:x1, y0:y1]

@@ -56,10 +56,21 @@ Explicit ``groups`` override (useful for non-contiguous partitions)::
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import mne
 
+
+# ----- REAL-TIME LOG FLUSH (Fix 1) -----
+# Ensure print() output appears immediately even when stdout is redirected
+# (nohup, pipe, subprocess).  Without this, logs accumulate in Python's
+# internal buffer and all flush at once, making the pipeline appear frozen.
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(line_buffering=True)
 logger = logging.getLogger("super_subject_eeg")
 
 
@@ -284,10 +295,15 @@ def load_super_subject_eeg(
 
     # Load each individual raw
     raws: list[mne.io.Raw] = []
-    for subj_idx in subject_ids:
+    _load_t0 = time.time()
+    _n_total = len(subject_ids)
+    for _load_i, subj_idx in enumerate(subject_ids, 1):
         subject = f"sub-{subj_idx:02d}"
         if verbose:
-            print(f"  [SuperSubject]   Loading {subject}/{session}/{task}...")
+            _elapsed = time.time() - _load_t0
+            _eta = (_elapsed / _load_i) * (_n_total - _load_i) if _load_i > 0 else 0
+            print(f"  [SuperSubject]   Loading {_load_i}/{_n_total} {subject}/{session}/{task}..."
+                  f"  (elapsed: {_elapsed:.1f}s, ETA: {_eta:.0f}s)")
         try:
             raw_i = load_test_retest_gedai_eeg_from_ids(
                 subject=subject,
@@ -303,6 +319,9 @@ def load_super_subject_eeg(
             logger.warning("  [SuperSubject] Skipping %s: %s", subject, exc)
             continue
         raws.append(raw_i)
+    if verbose:
+        print(f"  [SuperSubject] Loaded {len(raws)}/{_n_total} subjects in "
+              f"{time.time() - _load_t0:.1f}s")
 
     if not raws:
         raise FileNotFoundError(
@@ -320,7 +339,12 @@ def load_super_subject_eeg(
     raws = _harmonise_channels(raws)
 
     # Concatenate along time axis
+    if verbose:
+        print(f"  [SuperSubject] Concatenating {len(raws)} raws along time axis...")
+    _concat_t0 = time.time()
     raw_concat = mne.concatenate_raws(raws)
+    if verbose:
+        print(f"  [SuperSubject] Concatenation done in {time.time() - _concat_t0:.1f}s")
 
     if verbose:
         total_dur = raw_concat.times[-1]

@@ -101,6 +101,80 @@ def _find_matrix(stage2_meta: dict, keys: tuple[str, ...]) -> tuple[np.ndarray |
     return None, None
 
 
+def _try_hankel_aggregation(
+    matrix: np.ndarray, meta: dict, expected_n_channels: int
+) -> tuple[np.ndarray | None, str]:
+    """Agrega una matriz (n_basis, n_channels*depth) a (n_channels, n_basis).
+
+    Cuando se usa embedding Hankel, la matriz de Stage 2 tiene
+    ``n_channels * depth`` columnas (cada canal se replica con
+    ``depth`` retardos).  Esta función reshapea a
+    ``(n_basis, n_channels, depth)`` y promedia sobre el eje de
+    retardos para obtener pesos a nivel de canal con su signo.
+
+    Si el número de features Hankel no coincide exactamente con
+    ``expected_n_channels * depth`` (p. ej. porque DMD aplicó
+    average-reference internamente y eliminó un canal), se intenta
+    inferir el número efectivo de canales como el divisor entero
+    más cercano de la dimensión Hankel.
+    """
+    stage1 = meta.get("stage1") if isinstance(meta, dict) else None
+    if not isinstance(stage1, dict) or stage1.get("embedding") != "hankel":
+        return None, ""
+    depth = stage1.get("depth")
+    if depth is None or depth < 1:
+        return None, ""
+
+    r, c = matrix.shape
+    target_size = expected_n_channels * depth
+
+    # Orientar como (n_basis, n_channels * depth)
+    if c == target_size:
+        pass  # ya tiene la orientación correcta
+    elif r == target_size:
+        matrix = matrix.T
+        r, c = c, r
+    else:
+        # Flexible fallback: la dimensión Hankel puede no coincidir
+        # exactamente con expected_n_channels * depth si el método de
+        # stage2 modificó el número de canales (p. ej. DMD con
+        # average-reference + drop-last-channel).
+        # Se infiere el número efectivo de canales como el divisor
+        # entero más cercano.
+        resolved = False
+        for dim_size, needs_transpose in [(c, False), (r, True)]:
+            if dim_size % depth == 0 and dim_size // depth > 0:
+                n_eff_ch = dim_size // depth
+                if needs_transpose:
+                    matrix = matrix.T
+                    r, c = c, r
+                n_basis = r
+                try:
+                    aggregated = matrix.reshape(
+                        n_basis, n_eff_ch, depth
+                    ).mean(axis=2)
+                    if n_eff_ch != expected_n_channels:
+                        logger.info(
+                            "Hankel aggregation: effective channels (%d) != "
+                            "expected channels (%d); se usan %d filas de pesos.",
+                            n_eff_ch, expected_n_channels, n_eff_ch,
+                        )
+                    return (
+                        aggregated.T,
+                        f"hankel_aggregated(n_eff_ch={n_eff_ch})",
+                    )
+                except ValueError:
+                    continue
+        return None, ""
+
+    n_basis = r
+    try:
+        aggregated = matrix.reshape(n_basis, expected_n_channels, depth).mean(axis=2)
+        return aggregated.T, "hankel_aggregated"
+    except ValueError:
+        return None, ""
+
+
 def _orient_as_channel_by_basis(
     matrix: np.ndarray, expected_n_channels: int | None
 ) -> np.ndarray | None:
@@ -171,13 +245,19 @@ def extract_linear_weights(
 
     expected = _expected_n_channels(meta)
     weights = _orient_as_channel_by_basis(matrix, expected)
+    method = f"{name or 'stage2'}:{found_key}"
+
+    if weights is None and expected is not None:
+        weights, hkl = _try_hankel_aggregation(matrix, meta, expected)
+        if weights is not None:
+            method += f"|{hkl}"
+
     if weights is None:
         return None, f"shape_mismatch(stage2={name or 'unknown'}, key={found_key})"
 
-    method = f"{name or 'stage2'}:{found_key}"
     if np.iscomplexobj(weights):
-        weights = np.abs(weights)
-        method += "|abs"
+        weights = np.real(weights)
+        method += "|real"
 
     # Selección de columnas según meta['selected_indices'] (stage 3).
     sel = meta.get("selected_indices")
@@ -208,7 +288,7 @@ def extract_linear_weights(
 def compute_channel_latent_correlation(
     data: np.ndarray, latent: np.ndarray
 ) -> np.ndarray:
-    """Fallback no lineal: |correlación de Pearson| canal–dimensión latente.
+    """Fallback no lineal: correlación de Pearson canal–dimensión latente.
 
     Parameters
     ----------
@@ -222,7 +302,8 @@ def compute_channel_latent_correlation(
     Returns
     -------
     weights:
-        Array ``(n_channels, n_dim)`` con valores en ``[0, 1]``.
+        Array ``(n_channels, n_dim)`` con valores en ``[-1, 1]``
+        (signo preservado; el llamante normaliza por máximo absoluto).
     """
     data = np.asarray(data, dtype=float)
     latent = np.asarray(latent, dtype=float)
@@ -245,7 +326,7 @@ def compute_channel_latent_correlation(
     z_data = _zscore_rows(segment)
     z_lat = _zscore_rows(latent.T)
     corr = (z_data @ z_lat.T) / n_samples
-    return np.abs(corr)
+    return corr
 
 
 def compute_spectral_influence(

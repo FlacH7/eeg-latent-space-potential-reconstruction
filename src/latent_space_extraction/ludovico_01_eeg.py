@@ -66,6 +66,22 @@ def _resolve_csv_path(subject: str, db_path: str | Path) -> Path:
     return csv_file
 
 
+def _sanitize_column_names(col_names: list[str]) -> list[str]:
+    """Replace numeric-looking column names with 'Ch 0', 'Ch 1', ..."""
+    if not col_names:
+        return col_names
+    numeric_count = 0
+    for name in col_names:
+        try:
+            float(name)
+            numeric_count += 1
+        except (ValueError, TypeError):
+            pass
+    if numeric_count == len(col_names):
+        return [f"Ch {i}" for i in range(len(col_names))]
+    return col_names
+
+
 def _read_csv_as_matrix(csv_path: str | Path) -> tuple[np.ndarray, list[str]]:
     """Read a CSV file and return the data matrix and column names.
 
@@ -79,7 +95,9 @@ def _read_csv_as_matrix(csv_path: str | Path) -> tuple[np.ndarray, list[str]]:
     data : np.ndarray, shape (n_samples, n_channels)
         The time-series data transposed to (samples, channels) for MNE.
     col_names : list[str]
-        Original column names from the CSV header.
+        Column names from the CSV header.  If all column names look
+        like numeric values (no real header), they are replaced with
+        ``"Ch 0"``, ``"Ch 1"``, etc.
     """
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -87,6 +105,7 @@ def _read_csv_as_matrix(csv_path: str | Path) -> tuple[np.ndarray, list[str]]:
 
     df = pd.read_csv(csv_path)
     col_names = list(df.columns)
+    col_names = _sanitize_column_names(col_names)
     # MNE expects (n_channels, n_times), so transpose
     data = df.values.T  # shape: (n_channels, n_samples)
 

@@ -59,6 +59,7 @@ meta : dict
 from __future__ import annotations
 
 import time
+import sys
 import warnings
 from pathlib import Path
 from typing import Literal
@@ -412,11 +413,14 @@ def extract_latent_space(
               "(run_full_preprocessing).")
     else:
         t_pre = time.time()
+        print("[Stage 0] Band-pass filtering raw data...")
+        sys.stdout.flush()
         X, _raw_filtered, sfreq = extract_filtered_data_matrix(
             raw, l_freq=l_freq, h_freq=h_freq, verbose=verbose,
         )
         print(f"\n[Stage 0] Filtered data matrix: shape={X.shape} "
               f"| sfreq={sfreq:.1f} Hz | {time.time() - t_pre:.2f}s")
+        sys.stdout.flush()
 
     # =====================================================================
     # Stage 1 — Embedding
@@ -432,18 +436,24 @@ def extract_latent_space(
             "n_time_lost": 0,
         }
     else:
+        if stage1_embedding == "hankel":
+            print(f"[Stage 1] Building Hankel embedding (input {X.shape})...")
+            sys.stdout.flush()
         embedded, meta1 = stage1.fit_transform(X, ctx=ctx)
     ctx.stage1_meta = meta1
 
     print(f"[Stage 1] embedding={stage1_embedding!r} | "
           f"in={meta1.get('input_shape', '-')} → out={meta1.get('output_shape', '-')}"
           f" | {time.time() - t1:.2f}s")
+    sys.stdout.flush()
 
     # =====================================================================
     # Stage 2 — Dynamics
     # =====================================================================
     t2 = time.time()
     stage2 = build_stage2(stage2_dynamics, stage2_params)
+    print(f"[Stage 2] Running dynamics='{stage2_dynamics}'...")
+    sys.stdout.flush()
     Y2, meta2 = stage2.fit_transform(embedded, ctx=ctx, n_dim=n_dim)
 
     # Empate 5.1 — complex outputs (DMD) are already real-valued inside
@@ -455,19 +465,24 @@ def extract_latent_space(
     print(f"[Stage 2] dynamics={stage2_dynamics!r} (branch={meta2.get('branch', '-')}) | "
           f"in={meta2.get('input_shape', '-')} → out={tuple(Y2.shape)}"
           f" | {time.time() - t2:.2f}s")
+    sys.stdout.flush()
 
     # =====================================================================
     # Stage 3 — Mode selection
     # =====================================================================
     t3 = time.time()
     stage3 = build_stage3(stage3_selection, stage3_params)
+    print(f"[Stage 3] Running selection='{stage3_selection}'...")
+    sys.stdout.flush()
     Y_sel, meta3 = stage3.fit_transform(Y2, ctx=ctx, n_dim=n_dim)
+    sys.stdout.flush()
 
     # Final transpose: (n_dim, T') → (n_samples, n_dim)
     latent = Y_sel.T
     print(f"[Stage 3] selection={stage3_selection!r} | "
           f"selected={meta3['selected_indices']} | latent={latent.shape}"
           f" | {time.time() - t3:.2f}s")
+    sys.stdout.flush()
 
     elapsed = time.time() - t0
 
@@ -540,6 +555,7 @@ def extract_latent_space(
     }
 
     print(f"\n[Pipeline] Done in {elapsed:.2f}s — latent shape {latent.shape}")
+    sys.stdout.flush()
     return latent, meta
 
 

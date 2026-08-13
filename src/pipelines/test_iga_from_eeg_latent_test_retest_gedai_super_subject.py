@@ -527,6 +527,8 @@ def main() -> int:
     print("=" * 70)
 
     try:
+        print(f"  Loading super-subject EEG ({len(subject_ids) if subject_ids else args.subjects_per_super_subject} subjects)...")
+        sys.stdout.flush()
         raw = load_super_subject_eeg(
             super_subject_id=args.super_subject,
             session=args.session,
@@ -540,6 +542,7 @@ def main() -> int:
             preload=False,
             verbose=verbose,
         )
+        sys.stdout.flush()
     except (FileNotFoundError, ValueError) as exc:
         print(f"[ERROR] {exc}")
         return 1
@@ -610,6 +613,9 @@ def main() -> int:
         if args.ignore_cache and cache_path.exists():
             print("\n  [CACHE] --ignore-cache set. Recomputing latent space...")
 
+        print("\n  [INFO] Starting latent space extraction (this may take several minutes)...")
+        sys.stdout.flush()
+
         latent, meta = extract_latent_space(
             raw,
             n_dim=args.latent_dim,
@@ -624,6 +630,7 @@ def main() -> int:
             n_workers=args.workers,
             verbose=verbose,
         )
+        sys.stdout.flush()
 
         print(f"\n  [CACHE] Saving latent space to: {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -852,28 +859,33 @@ def main() -> int:
     print("\n" + "=" * 70)
     print("  STAGE 2: BANDWIDTH OPTIMISATION")
     print("=" * 70)
+    sys.stdout.flush()
+    if D < 4:
+        result_bw = optimal_bw(
+            data=data,
+            bins=config["bins"],
+            dt=dt,
+            p=2,
+            kernel="epanechnikov",
+            theoretical=None,
+            sigma_smooth=1.0,
+            n_candidates=30,
+            n_jobs=-1 if D + config["degree"] <= 4 else 1,
+            plot=True,
+            auto_weight=True,
+        )
+        bw_opt = result_bw["optimal_bw"]
+        sys.stdout.flush()
+        print(f"\n  Optimal bandwidth: {bw_opt:.4f}")
+        print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
+        print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
 
-    result_bw = optimal_bw(
-        data=data,
-        bins=config["bins"],
-        dt=dt,
-        p=2,
-        kernel="epanechnikov",
-        theoretical=None,
-        sigma_smooth=1.0,
-        n_candidates=30,
-        n_jobs=-1 if D + config["degree"] <= 4 else 1,
-        plot=True,
-        auto_weight=True,
-    )
-    bw_opt = result_bw["optimal_bw"]
-    print(f"\n  Optimal bandwidth: {bw_opt:.4f}")
-    print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
-    print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
-
-    if "fig" in result_bw:
-        result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
-        plt.close(result_bw["fig"])
+        if "fig" in result_bw:
+            result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
+            plt.close(result_bw["fig"])
+    else:
+        print("  [WARN] Bandwidth optimisation skipped for D >= 4 (computationally expensive).")
+        bw_opt = 0.0002
 
     # =====================================================================
     # 6. ESTIMATE KM COEFFICIENTS

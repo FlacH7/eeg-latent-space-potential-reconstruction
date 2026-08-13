@@ -52,6 +52,7 @@ Critical handoffs implemented here (see refactor specification §5)
 
 from __future__ import annotations
 
+import sys
 import time
 
 import numpy as np
@@ -188,6 +189,7 @@ class PCADynamics:
             "input_shape": tuple(data.shape),
             "output_shape": tuple(scores.shape),
             "singular_values": s.tolist(),
+            "components_": U,  # (n_features, n_components) — left singular vectors
             "elapsed_time": time.time() - t0,
         }
         return scores, meta
@@ -335,20 +337,19 @@ class PCAICADynamics:
         )
 
         # (a) Truncated SVD of H
+        print(f"  [Stage2/pca_ica] Step (a): Truncated SVD of H {H.shape} → rank {n_components}...")
+        sys.stdout.flush()
         U, s, Vh = _truncated_svd(H, n_components)
+        print(f"  [Stage2/pca_ica] SVD done ({time.time() - t0:.2f}s). Whitening...")
+        sys.stdout.flush()
 
-        # (b) Whitened PC matrix (spec §5 Empate 1.2b).
-        #     The PC time courses are Σ Vᵀ (row variance ≈ σ²); whitening
-        #     removes the per-row scale.  The spec's "Z = Σ^{-1/2} Vᵀ" is
-        #     implemented in its equivalent form: standardise the PC time
-        #     courses to unit variance.  (Any positive row scaling is
-        #     absorbed by FastICA's internal whitening, so this choice is
-        #     exact up to an irrelevant per-row constant.)
+        # (b) Whitened PC matrix
         Z = np.diag(s) @ Vh                    # PC time courses Σ Vᵀ
         Z = Z / Z.std(axis=1, keepdims=True)   # whitened: unit-variance rows
 
         # (c) sklearn FastICA over the whitened PCs.
-        #     sklearn expects (n_samples, n_features) → time × PCs.
+        print(f"  [Stage2/pca_ica] Step (c): FastICA on {n_components} whitened PCs ({Z.shape[1]:,} time points)...")
+        sys.stdout.flush()
         from sklearn.decomposition import FastICA
 
         ica = FastICA(
@@ -362,6 +363,15 @@ class PCAICADynamics:
         Y = S.T                     # (D, T') — Stage-2 output convention
         Y = Y - Y.mean(axis=1, keepdims=True)
 
+        # Channel-space mixing matrix for influence analysis:
+        # Full map: H → U Σ Vᵀ → Z → ICA → S
+        # S = Z @ W_ica.T  where W_ica = ica.components_ (unmixing)
+        # Z = diag(s) @ Vh  (PC time courses)
+        # So S.T ≈ H.T @ (Vh.T * s) @ W_ica.T ... but for influence we
+        # store the SVD left singular vectors (same as PCA) so that
+        # _try_hankel_aggregation can reduce them to channel space.
+        # The ICA unmixing is nonlinear w.r.t. channels; storing U gives
+        # the PCA-level channel influence as best linear approximation.
         meta = {
             "dynamics": "pca_ica",
             "branch": "svd_whitening_fastica_sklearn",
@@ -369,6 +379,7 @@ class PCAICADynamics:
             "output_shape": tuple(Y.shape),
             "svd_rank": n_components,
             "singular_values": s.tolist(),
+            "components_": U,  # (n_features, n_components) — SVD left vectors (PCA-level)
             "ica_solver": "fastica",
             "ica_random_state": self.ica_random_state,
             "n_iter_": int(getattr(ica, "n_iter_", -1)),
@@ -474,6 +485,7 @@ class DMDDynamics:
             "damping_rates": osc["damp"].real.tolist(),
             "eigenvalues": osc["lambda"].tolist(),
             "continuous_eigenvalues": osc["omega"].tolist(),
+            "modes": np.real(L),  # (n_hankel_cols, rank) — left DMD modes
             "elapsed_time": time.time() - t0,
         }
         return scores, meta
@@ -532,6 +544,7 @@ class DMDDynamics:
             "frequencies_hz": freq.real[order][:rank].tolist(),
             "damping_rates": damp.real[order][:rank].tolist(),
             "eigenvalues": lam[order][:rank].tolist(),
+            "modes": np.real(W_sorted[:, :rank]),  # (N_c, rank) — right eigenvectors
             "elapsed_time": time.time() - t0,
         }
         return scores, meta
