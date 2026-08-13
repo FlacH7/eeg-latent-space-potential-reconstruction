@@ -56,7 +56,6 @@ import numpy as np
 from numpy.typing import NDArray
 import mne
 
-
 # =====================================================================
 # CDHSAConfig
 # =====================================================================
@@ -538,6 +537,171 @@ def build_hankel_from_eeg(
     return X, info
 
 
+def build_hankel_single_ss(
+    *,
+    super_subject_id: int,
+    session: str,
+    tasks: list[str],
+    subjects_per_super_subject: int = 20,
+    subject_start_offset: int = 1,
+    db_path: str | Path | None = None,
+    t_start: float | None = None,
+    t_stop: float | None = None,
+    l_freq: float = 1.0,
+    h_freq: float = 40.0,
+    hankel_depth: int | None = None,
+    verbose: bool | str | None = None,
+) -> tuple[list[list[NDArray[np.floating]]], dict]:
+    """Construir matrices de Hankel para un UNICO super-sujeto (S=1).
+
+    Carga el super-sujeto indicado para cada condicion, construye
+    la Hankel y retorna X con S=1.  No necesita interseccion
+    global de canales porque solo hay un super-sujeto.
+    """
+    from src.latent_space_extraction.super_subject_eeg import (
+        load_super_subject_eeg,
+        resolve_super_subject_subject_ids,
+    )
+    from src.latent_space_extraction.eeg_preprocessing import (
+        extract_filtered_data_matrix,
+    )
+    from src.latent_space_extraction.hankel_dmd_extractor import (
+        _build_multivariate_hankel,
+        _auto_embedding_depth,
+    )
+
+    if db_path is None:
+        try:
+            from src.utils.config import DB_TEST_RETEST_GEDAI_PATH
+            db_path = DB_TEST_RETEST_GEDAI_PATH
+        except ImportError:
+            raise ValueError(
+                "--db-path es obligatorio si src.utils.config "
+                "no define DB_TEST_RETEST_GEDAI_PATH."
+            )
+
+    member_ids = resolve_super_subject_subject_ids(
+        super_subject_id=super_subject_id,
+        subjects_per_super_subject=subjects_per_super_subject,
+        subject_start_offset=subject_start_offset,
+    )
+
+    C = len(tasks)
+    print(f"  Super-sujeto {super_subject_id}: "
+          f"subs {member_ids[0]}..{member_ids[-1]} ({len(member_ids)})")
+    print(f"  Condiciones: {', '.join(tasks)}")
+    print()
+
+    X_s: list[NDArray[np.floating]] = []
+    shapes_s: list[tuple[int, int] | None] = []
+    sfreqs: list[float] = []
+    depths_used: list[int] = []
+    n_channels_list: list[int] = []
+    n_times_filtered_list: list[int] = []
+    durations: list[float] = []
+    skipped: list[tuple[int, int, str]] = []
+    ch_names: list[str] = []
+
+    t0 = time.time()
+
+    for c_idx, task in enumerate(tasks):
+        tag = f"  [{c_idx+1}/{C}] {task} ..."
+        print(tag, end=" ")
+        sys.stdout.flush()
+
+        try:
+            raw = load_super_subject_eeg(
+                super_subject_id=super_subject_id,
+                session=session,
+                task=task,
+                subjects_per_super_subject=subjects_per_super_subject,
+                subject_start_offset=subject_start_offset,
+                db_path=db_path,
+                t_start=t_start,
+                t_stop=t_stop,
+                preload=True,
+                verbose=False,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"SKIP ({exc})")
+            X_s.append(np.empty((0, 0)))
+            shapes_s.append(None)
+            skipped.append((0, c_idx, str(exc)))
+            continue
+
+        sfreq = float(raw.info["sfreq"])
+        duration_s = raw.times[-1]
+        n_ch = len(raw.ch_names)
+        if not ch_names:
+            ch_names = list(raw.ch_names)
+
+        X_filtered, _raw_filt, sfreq = extract_filtered_data_matrix(
+            raw, l_freq=l_freq, h_freq=h_freq, verbose=False,
+        )
+        del raw, _raw_filt
+        n_ch, n_times = X_filtered.shape
+
+        if hankel_depth is None:
+            depth = _auto_embedding_depth(sfreq, n_times)
+        else:
+            depth = int(hankel_depth)
+
+        if depth >= n_times:
+            print(f"SKIP (depth={depth} >= n_times={n_times})")
+            X_s.append(np.empty((0, 0)))
+            shapes_s.append(None)
+            skipped.append((0, c_idx,
+                f"depth={depth} >= n_times={n_times}"))
+            continue
+
+        H = _build_multivariate_hankel(X_filtered, depth)
+        del X_filtered
+
+        X_s.append(H)
+        shapes_s.append(H.shape)
+        sfreqs.append(sfreq)
+        depths_used.append(depth)
+        n_channels_list.append(n_ch)
+        n_times_filtered_list.append(n_times)
+        durations.append(duration_s)
+
+        print(f"OK  ch={n_ch} T={n_times} dur={duration_s:.0f}s "
+              f"depth={depth} -> H={H.shape}")
+        sys.stdout.flush()
+
+    elapsed = time.time() - t0
+
+    info = {
+        "mode": "single_super_subject",
+        "super_subject_id": super_subject_id,
+        "member_ids": member_ids,
+        "session": session,
+        "tasks": tasks,
+        "S": 1,
+        "C": C,
+        "subjects_per_super_subject": subjects_per_super_subject,
+        "subject_start_offset": subject_start_offset,
+        "global_channels": ch_names,
+        "l_freq": l_freq,
+        "h_freq": h_freq,
+        "hankel_depth_requested": hankel_depth,
+        "shapes": [shapes_s],
+        "sfreqs": sfreqs,
+        "depths_used": depths_used,
+        "n_channels": n_channels_list,
+        "n_times_filtered": n_times_filtered_list,
+        "durations": durations,
+        "skipped": skipped,
+        "elapsed_build": elapsed,
+    }
+    if sfreqs:
+        info["sfreq_common"] = sfreqs[0]
+        info["depth_common"] = depths_used[0]
+        info["n_channels_common"] = n_channels_list[0]
+
+    return [X_s], info
+
+
 def characterize_hankel_matrices(
     X: list[list[NDArray[np.floating]]],
     info: dict,
@@ -637,6 +801,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     # --- Fuente de datos (super-sujetos) ---
+    # Modo 1: --n-super-subjects (multi-SS, particion automatica)
+    # Modo 2: --super-subject-id (single-SS, para batch por SS)
+    mode_ss = parser.add_mutually_exclusive_group(required=True)
+    mode_ss.add_argument(
+        "--n-super-subjects", type=int,
+        help=("Cantidad de super-sujetos a armar. "
+              "Los total_subjects se reparten equitativamente "
+              "(ej: 60/3 = 20 subjects por super-sujeto)."),
+    )
+    mode_ss.add_argument(
+        "--super-subject-id", type=int,
+        help=("ID de un unico super-sujeto (1-indexed). "
+              "Usado por el batch runner para correr CD-HSA "
+              "con S=1 sobre un solo grupo de sujetos."),
+    )
+
     parser.add_argument(
         "--session", type=str, required=True,
         help="Session ID (ej: session1)",
@@ -646,14 +826,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Condiciones/tareas (ej: eyesclosed eyesopen)",
     )
     parser.add_argument(
-        "--n-super-subjects", type=int, required=True,
-        help=("Cantidad de super-sujetos a armar. "
-              "Los total_subjects se reparten equitativamente "
-              "(ej: 60/3 = 20 subjects por super-sujeto)."),
-    )
-    parser.add_argument(
         "--total-subjects", type=int, default=60,
         help="Total de sujetos individuales disponibles. Default: 60",
+    )
+    parser.add_argument(
+        "--subjects-per-super-subject", type=int, default=20,
+        help="Sujetos por super-sujeto (solo con --super-subject-id). Default: 20",
     )
     parser.add_argument(
         "--subject-start-offset", type=int, default=1,
@@ -683,14 +861,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # --- Hankel ---
     parser.add_argument(
-        "--hankel-depth", type=int, default=10,
+        "--hankel-depth", type=int, default=None,
         help="Profundidad Hankel. None = auto",
     )
 
     # --- Config CDHSA ---
     g = parser.add_argument_group("Parametros CDHSA")
-    g.add_argument("--fixed-rank", type=int, default=25)
-    g.add_argument("--rank-method", type=str, default="reproducibility",
+    g.add_argument("--fixed-rank", type=int, default=10)
+    g.add_argument("--rank-method", type=str, default="fixed",
                    choices=["fixed", "reproducibility"])
     g.add_argument("--a6-n-null", type=int, default=500)
     g.add_argument("--bc-n-perm", type=int, default=5000)
@@ -752,9 +930,14 @@ def _resolve_out_dir(args: argparse.Namespace) -> Path:
     t_start_tag = f"{args.t_start}s" if args.t_start is not None else "any"
     t_end_tag = f"{args.t_end}s" if args.t_end is not None else "any"
 
+    if args.super_subject_id is not None:
+        ss_label = f"SS{args.super_subject_id}"
+    else:
+        ss_label = f"nSS{args.n_super_subjects}"
+
     out_dir = Path(
         f"{base}/cdhsa/{args.session}"
-        f"/nSS{args.n_super_subjects}_L{args.L}"
+        f"/{ss_label}_L{args.L}"
         f"_fr{args.fixed_rank}_a6n{args.a6_n_null}_bcn{args.bc_n_perm}"
         f"/{args.l_freq}-{args.h_freq}Hz"
         f"_depth{args.hankel_depth or 'auto'}"
@@ -872,25 +1055,47 @@ def main(argv: list[str] | None = None) -> int:
     else:
         out_dir = None
 
-    # 1. Construir matrices de Hankel desde super-sujetos
-    print("=" * 70)
-    print("  CONSTRUYENDO MATRICES DE HANKEL DESDE SUPER-SUJETOS")
-    print("=" * 70)
+    # 1. Construir matrices de Hankel
+    single_mode = args.super_subject_id is not None
 
-    X, hankel_info = build_hankel_from_eeg(
-        session=args.session,
-        tasks=args.tasks,
-        n_super_subjects=args.n_super_subjects,
-        total_subjects=args.total_subjects,
-        subject_start_offset=args.subject_start_offset,
-        db_path=args.db_path,
-        t_start=args.t_start,
-        t_stop=args.t_end,
-        l_freq=args.l_freq,
-        h_freq=args.h_freq,
-        hankel_depth=args.hankel_depth,
-        verbose=verbose,
-    )
+    if single_mode:
+        print("=" * 70)
+        print("  CONSTRUYENDO MATRICES DE HANKEL (SINGLE SUPER-SUBJECT)")
+        print("=" * 70)
+
+        X, hankel_info = build_hankel_single_ss(
+            super_subject_id=args.super_subject_id,
+            session=args.session,
+            tasks=args.tasks,
+            subjects_per_super_subject=args.subjects_per_super_subject,
+            subject_start_offset=args.subject_start_offset,
+            db_path=args.db_path,
+            t_start=args.t_start,
+            t_stop=args.t_end,
+            l_freq=args.l_freq,
+            h_freq=args.h_freq,
+            hankel_depth=args.hankel_depth,
+            verbose=verbose,
+        )
+    else:
+        print("=" * 70)
+        print("  CONSTRUYENDO MATRICES DE HANKEL DESDE SUPER-SUJETOS")
+        print("=" * 70)
+
+        X, hankel_info = build_hankel_from_eeg(
+            session=args.session,
+            tasks=args.tasks,
+            n_super_subjects=args.n_super_subjects,
+            total_subjects=args.total_subjects,
+            subject_start_offset=args.subject_start_offset,
+            db_path=args.db_path,
+            t_start=args.t_start,
+            t_stop=args.t_end,
+            l_freq=args.l_freq,
+            h_freq=args.h_freq,
+            hankel_depth=args.hankel_depth,
+            verbose=verbose,
+        )
 
     # 2. Caracterizar
     characterization = characterize_hankel_matrices(X, hankel_info)
@@ -916,13 +1121,20 @@ def main(argv: list[str] | None = None) -> int:
         skip_d=args.skip_d,
     )
 
+    S = len(X)
     print("\n" + "=" * 70)
     print("  EJECUTANDO CD-HSA")
     print("=" * 70)
-    print(f"  L (subespacio)        : {args.L}")
-    print(f"  Super-sujetos (S)     : {args.n_super_subjects}")
-    print(f"  Subjects por SS       : {args.total_subjects // args.n_super_subjects}")
+    print(f"  Modo                  : {'single-SS' if single_mode else 'multi-SS'}")
+    if single_mode:
+        print(f"  Super-sujeto ID        : {args.super_subject_id}")
+        print(f"  Subjects por SS       : {args.subjects_per_super_subject}")
+    else:
+        print(f"  Super-sujetos (S)     : {args.n_super_subjects}")
+        print(f"  Subjects por SS       : {args.total_subjects // args.n_super_subjects}")
+    print(f"  S (matrices)          : {S}")
     print(f"  Condiciones (C)       : {len(args.tasks)}")
+    print(f"  L (subespacio)        : {args.L}")
     print(f"  fixed_rank            : {cfg.fixed_rank}")
     print(f"  a6_n_null             : {cfg.a6_n_null}")
     print(f"  bc_n_perm             : {cfg.bc_n_perm}")

@@ -1,0 +1,42 @@
+{
+  "experiment_label": "per_ss_condition_modes_comparison",
+  "_comment_experiment": "Correr CD-HSA por separado en cada super-sujeto (S=1) y comparar modos especificos por condicion entre ellos.",
+
+  "super_subjects": {
+    "selected": [1, 2, 3],
+    "subjects_per_super_subject": 20,
+    "subject_start_offset": 1,
+    "total_subjects": 60,
+    "_comment_groups": "Opcional: si se define, toma precedencia. Claves = IDs de super-sujetos, valores = listas de indices de sujetos."
+  },
+
+  "sessions": ["session1"],
+
+  "tasks": ["eyesclosed", "music"],
+
+  "time_window": {
+    "t_start": 0.0,
+    "t_end": 60.0,
+    "_comment": "Ventana temporal POR SUJETO antes de concatenar. Con t_end=60 y 20 subjects, cada SS tiene 1200s. Para 256GB con L=27, t_end_max ~ 200s."
+  },
+
+  "cdhsa_params": {
+    "L": 27,
+    "hankel_depth": 10,
+    "l_freq": 1.0,
+    "h_freq": 40.0,
+    "fixed_rank": 25,
+    "rank_method": "reproducibility",
+    "a6_n_null": 500,
+    "bc_n_perm": 5000,
+    "skip_bc": false,
+    "skip_tangent": false,
+    "skip_d": false
+  },
+
+  "execution": {
+    "max_workers": 1,
+    "delay": 2.0,
+    "run_comparison": true
+  }
+}
