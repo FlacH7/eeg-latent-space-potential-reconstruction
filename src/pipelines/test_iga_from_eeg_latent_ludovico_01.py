@@ -863,7 +863,7 @@ def main() -> int:
         drift, diffusion, edges, density=density,
         method="iga", return_full=True, degree=config["degree"],
         decompose_helmholtz=True, density_threshold=0.01,
-        rtol=1e-2, atol=1e-12, compute_stream_function=True,
+        rtol=5e-2, atol=1e-12, compute_stream_function=True,
     )
 
     U_rec = result_iga["potential"]
