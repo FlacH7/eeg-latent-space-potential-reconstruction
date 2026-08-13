@@ -931,7 +931,7 @@ def main() -> int:
             crop_to_valid=True, show_streamlines=False,
             stream_function=result_iga.get('stream_function'),
             reconstructed_field=result_iga.get('reconstructed_field'),
-            clip_percentile = 99.00
+            clip_percentile = 95.00
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -947,8 +947,8 @@ def main() -> int:
             align_minima=True, align_to_zero=True,
             crop_to_valid=True,
             stream_function=result_iga.get('stream_function'),
-            reconstructed_field=result_iga.get('reconstructed_field'),
-            clip_percentile = 99.00
+            reconstructed_field=result_iga.get('reconstructed_drift'),
+            clip_percentile = 95.00
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -992,10 +992,10 @@ def main() -> int:
                 U_rec, edges,
                 stream_function=result_iga.get('stream_function'),
                 nonconservative_force=result_iga.get('nonconservative_force'),
-                reconstructed_field=result_iga.get('reconstructed_field'),
+                reconstructed_field=result_iga.get('reconstructed_drift'),
                 title=f"{config['model_name'].upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)",
                 crop_to_valid=True,
-                clip_percentile=99.00
+                clip_percentile=95.00
             )
             fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
             plt.close(fig_comb)
