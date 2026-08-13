@@ -278,13 +278,17 @@ def build_hankel_from_eeg(
     de tamano ``total_subjects // n_super_subjects``.  Cada super-sujeto
     es la concatenacion temporal de sus sujetos individuales.
 
+    Se usa una interseccion GLOBAL de canales entre todos los
+    super-sujetos y condiciones para garantizar que todas las
+    matrices de Hankel tengan el mismo numero de filas ``p``.
+
     Pipeline por (super-sujeto, condicion)::::
 
-        1. Cargar y concatenar EEG -> load_super_subject_eeg()
-           (carga N sujetos, armoniza canales, concatena en tiempo)
-        2. Filtro pasa-banda -> extract_filtered_data_matrix()
+        0. Cargar todos los raws -> interseccion global de canales
+        1. Pick canales comunes  -> raw.pick(common_channels)
+        2. Filtro pasa-banda    -> extract_filtered_data_matrix()
            X_filtered: (n_channels, n_times), centrada a media cero
-        3. Matriz de Hankel -> _build_multivariate_hankel()
+        3. Matriz de Hankel     -> _build_multivariate_hankel()
            H: (n_channels * depth, n_times - depth + 1)
 
     Returns
@@ -335,39 +339,31 @@ def build_hankel_from_eeg(
           f"..{subject_start_offset + S*subjects_per - 1}")
     print()
 
-    X: list[list[NDArray[np.floating]]] = []
-    shapes: list[list[tuple[int, int] | None]] = []
-    sfreqs: list[float] = []
-    depths_used: list[int] = []
-    n_channels_list: list[int] = []
-    n_times_filtered_list: list[int] = []
-    skipped: list[tuple[int, int, str]] = []
-    super_subject_ids_list: list[list[int]] = []
-    durations: list[float] = []
+    # =================================================================
+    # PASADA 0: Cargar todos los raws y calcular interseccion global
+    # =================================================================
+    print("  PASADA 0: Cargando raws para calcular interseccion global de canales...")
+    sys.stdout.flush()
 
-    t0_global = time.time()
+    raws_store: dict[tuple[int, int], "mne.io.Raw"] = {}  # (ss_idx, c_idx) -> raw
+    ss_member_ids: dict[int, list[int]] = {}
+    load_errors: list[tuple[int, int, str]] = []
 
+    t0_load = time.time()
     for ss_id in range(1, S + 1):
-        ss_label = f"super_subject-{ss_id:02d}"
-        X_s: list[NDArray[np.floating]] = []
-        shapes_s: list[tuple[int, int] | None] = []
-
-        # Resolver que sujetos componen este super-sujeto
         member_ids = resolve_super_subject_subject_ids(
             super_subject_id=ss_id,
             subjects_per_super_subject=subjects_per,
             subject_start_offset=subject_start_offset,
         )
-        super_subject_ids_list.append(member_ids)
+        ss_member_ids[ss_id] = member_ids
 
         for c_idx, task in enumerate(tasks):
-            tag = (f"[{ss_id}/{S}] {ss_label} "
-                   f"(subs {member_ids[0]}..{member_ids[-1]})"
+            tag = (f"  [{ss_id}/{S}] (subs {member_ids[0]}..{member_ids[-1]})"
                    f"/{session}/{task}")
-            print(f"  {tag} ...", end=" ")
+            print(f"{tag} ...", end=" ")
             sys.stdout.flush()
 
-            # --- Paso 1: Cargar y concatenar super-sujeto ---
             try:
                 raw = load_super_subject_eeg(
                     super_subject_id=ss_id,
@@ -383,22 +379,89 @@ def build_hankel_from_eeg(
                 )
             except (FileNotFoundError, ValueError) as exc:
                 print(f"SKIP ({exc})")
-                X_s.append(np.empty((0, 0)))
-                shapes_s.append(None)
-                skipped.append((ss_id - 1, c_idx, str(exc)))
+                load_errors.append((ss_id - 1, c_idx, str(exc)))
                 continue
 
+            raws_store[(ss_id - 1, c_idx)] = raw
+            print(f"OK  ch={len(raw.ch_names)} dur={raw.times[-1]:.0f}s")
+            sys.stdout.flush()
+
+    print(f"  Carga completa en {time.time() - t0_load:.1f}s")
+
+    if not raws_store:
+        raise RuntimeError("No se pudo cargar ningun raw.")
+
+    # --- Interseccion global de canales ---
+    all_ch_names: list[list[str]] = [
+        raws_store[key].ch_names for key in sorted(raws_store)
+    ]
+    # Preservar orden del primer raw
+    global_channels = list(all_ch_names[0])
+    for ch_list in all_ch_names[1:]:
+        global_channels = [ch for ch in global_channels if ch in ch_list]
+
+    n_ch_before = {len(cl) for cl in all_ch_names}
+    print(f"  Canales por raw antes: {n_ch_before}")
+    print(f"  Interseccion global  : {len(global_channels)} canales")
+    if len(global_channels) < min(n_ch_before):
+        print(f"  (se descartan {min(n_ch_before) - len(global_channels)} canales)")
+    print()
+
+    # =================================================================
+    # PASADA 1: Pick canales comunes + filtro + Hankel
+    # =================================================================
+    print("  PASADA 1: Construyendo matrices de Hankel...")
+    sys.stdout.flush()
+
+    X: list[list[NDArray[np.floating]]] = []
+    shapes: list[list[tuple[int, int] | None]] = []
+    sfreqs: list[float] = []
+    depths_used: list[int] = []
+    n_channels_list: list[int] = []
+    n_times_filtered_list: list[int] = []
+    skipped: list[tuple[int, int, str]] = list(load_errors)
+    super_subject_ids_list: list[list[int]] = []
+    durations: list[float] = []
+
+    t0_global = time.time()
+
+    for ss_id in range(1, S + 1):
+        ss_label = f"super_subject-{ss_id:02d}"
+        X_s: list[NDArray[np.floating]] = []
+        shapes_s: list[tuple[int, int] | None] = []
+        member_ids = ss_member_ids[ss_id]
+        super_subject_ids_list.append(member_ids)
+
+        for c_idx, task in enumerate(tasks):
+            tag = (f"[{ss_id}/{S}] {ss_label} "
+                   f"(subs {member_ids[0]}..{member_ids[-1]})"
+                   f"/{session}/{task}")
+
+            key = (ss_id - 1, c_idx)
+            if key not in raws_store:
+                print(f"  {tag} SKIP (error en carga)")
+                X_s.append(np.empty((0, 0)))
+                shapes_s.append(None)
+                continue
+
+            raw = raws_store.pop(key)  # liberar memoria
+            print(f"  {tag} ...", end=" ")
+            sys.stdout.flush()
+
+            # --- Pick canales comunes ---
+            raw.pick(global_channels)
             sfreq = float(raw.info["sfreq"])
             duration_s = raw.times[-1]
             n_ch_raw = len(raw.ch_names)
 
-            # --- Paso 2: Filtro pasa-banda ---
+            # --- Filtro pasa-banda ---
             X_filtered, _raw_filt, sfreq = extract_filtered_data_matrix(
                 raw, l_freq=l_freq, h_freq=h_freq, verbose=False,
             )
+            del raw, _raw_filt  # liberar memoria
             n_ch, n_times = X_filtered.shape
 
-            # --- Paso 3: Construir matriz de Hankel ---
+            # --- Construir matriz de Hankel ---
             if hankel_depth is None:
                 depth = _auto_embedding_depth(sfreq, n_times)
             else:
@@ -413,6 +476,7 @@ def build_hankel_from_eeg(
                 continue
 
             H = _build_multivariate_hankel(X_filtered, depth)
+            del X_filtered  # liberar memoria
 
             X_s.append(H)
             shapes_s.append(H.shape)
@@ -422,13 +486,16 @@ def build_hankel_from_eeg(
             n_times_filtered_list.append(n_times)
             durations.append(duration_s)
 
-            print(f"OK  ch={n_ch} T_raw={n_times} "
+            print(f"OK  ch={n_ch} T={n_times} "
                   f"dur={duration_s:.0f}s "
                   f"depth={depth} -> H={H.shape}")
             sys.stdout.flush()
 
         X.append(X_s)
         shapes.append(shapes_s)
+
+    # Liberar cualquier raw residual
+    raws_store.clear()
 
     elapsed = time.time() - t0_global
 
@@ -445,6 +512,8 @@ def build_hankel_from_eeg(
         "l_freq": l_freq,
         "h_freq": h_freq,
         "hankel_depth_requested": hankel_depth,
+        "global_channels": global_channels,
+        "n_global_channels": len(global_channels),
         "shapes": shapes,
         "sfreqs": sfreqs,
         "depths_used": depths_used,
@@ -452,6 +521,7 @@ def build_hankel_from_eeg(
         "n_times_filtered": n_times_filtered_list,
         "durations": durations,
         "skipped": skipped,
+        "elapsed_load": time.time() - t0_load,
         "elapsed_build": elapsed,
     }
     if sfreqs:
