@@ -618,10 +618,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # --- Config CDHSA ---
     g = parser.add_argument_group("Parametros CDHSA")
-    g.add_argument("--fixed-rank", type=int, default=10)
-    g.add_argument("--rank-method", type=str, default="fixed",
+    g.add_argument("--fixed-rank", type=int, default=25)
+    g.add_argument("--rank-method", type=str, default="reproducibility",
                    choices=["fixed", "reproducibility"])
-    g.add_argument("--a6-n-null", type=int, default=100)
+    g.add_argument("--a6-n-null", type=int, default=500)
     g.add_argument("--bc-n-perm", type=int, default=5000)
     g.add_argument("--skip-bc", action="store_true")
     g.add_argument("--skip-tangent", action="store_true")
