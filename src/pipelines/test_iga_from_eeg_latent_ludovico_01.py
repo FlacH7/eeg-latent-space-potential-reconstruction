@@ -931,6 +931,7 @@ def main() -> int:
             crop_to_valid=True, show_streamlines=False,
             stream_function=result_iga.get('stream_function'),
             reconstructed_field=result_iga.get('reconstructed_field'),
+            clip_percentile = 99.00
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -947,6 +948,7 @@ def main() -> int:
             crop_to_valid=True,
             stream_function=result_iga.get('stream_function'),
             reconstructed_field=result_iga.get('reconstructed_field'),
+            clip_percentile = 99.00
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -993,6 +995,7 @@ def main() -> int:
                 reconstructed_field=result_iga.get('reconstructed_field'),
                 title=f"{config['model_name'].upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)",
                 crop_to_valid=True,
+                clip_percentile=99.00
             )
             fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
             plt.close(fig_comb)
