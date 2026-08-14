@@ -11,7 +11,7 @@
 
   "sessions": ["session1"],
 
-  "tasks": ["eyesclosed", "mathematic"],
+  "tasks": ["eyesclosed", "music"],
 
   "time_window": {
     "t_start": 100.0,
