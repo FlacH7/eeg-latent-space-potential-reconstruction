@@ -9,8 +9,8 @@
   "sessions": ["session1"],
   "tasks": ["eyesclosed","music"],
   "time_window": {
-    "t_start": 100.0,
-    "t_end": 200.0
+    "t_start": 0.0,
+    "t_end": 300.0
   },
   "cdhsa_params": {
     "L": 27,
