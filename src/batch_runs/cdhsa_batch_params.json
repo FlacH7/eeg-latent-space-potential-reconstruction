@@ -1,23 +1,22 @@
 {
-  "experiment_label": "per_ss_condition_modes_comparison",
-  "_comment_experiment": "Correr CD-HSA por separado en cada super-sujeto (S=1) y comparar modos especificos por condicion entre ellos.",
+  "experiment_label": "multiss_cdhsa_5ss_5tasks",
+  "_comment_experiment": "CD-HSA en modo multi-SS: los 5 super-sujetos juntos (S=5) con 5 tareas (C=5). CD-HSA encuentra modos comunes entre SS y modos especificos por tarea con soporte estadistico cross-subject.",
 
   "super_subjects": {
-    "selected": [1, 2, 3],
-    "subjects_per_super_subject": 20,
+    "n_super_subjects": 5,
+    "subjects_per_super_subject": 12,
     "subject_start_offset": 1,
-    "total_subjects": 60,
-    "_comment_groups": "Opcional: si se define, toma precedencia. Claves = IDs de super-sujetos, valores = listas de indices de sujetos."
+    "total_subjects": 60
   },
 
   "sessions": ["session1"],
 
-  "tasks": ["eyesclosed", "music"],
+  "tasks": ["eyesclosed", "eyesopen", "music", "memory", "mathematic"],
 
   "time_window": {
     "t_start": 0.0,
-    "t_end": 60.0,
-    "_comment": "Ventana temporal POR SUJETO antes de concatenar. Con t_end=60 y 20 subjects, cada SS tiene 1200s. Para 256GB con L=27, t_end_max ~ 200s."
+    "t_end": 300.0,
+    "_comment": "Ventana temporal POR SUJETO. Con t_end=300 y 12 subjects, cada SS tiene 3600s. Requiere ~256GB RAM con L=27 y depth=10."
   },
 
   "cdhsa_params": {
@@ -26,7 +25,7 @@
     "l_freq": 1.0,
     "h_freq": 40.0,
     "fixed_rank": 25,
-    "rank_method": "reproducibility",
+    "rank_method": "fixed",
     "a6_n_null": 500,
     "bc_n_perm": 5000,
     "skip_bc": false,
@@ -36,7 +35,7 @@
 
   "execution": {
     "max_workers": 1,
-    "delay": 2.0,
-    "run_comparison": true
+    "delay": 0.0,
+    "run_comparison": false
   }
 }

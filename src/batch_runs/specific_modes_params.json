@@ -1,5 +1,5 @@
 {
-  "experiment_label": "5ss_5task_specific_modes_robustness",
+  "experiment_label": "5ss_2task_specific_modes",
   "super_subjects": {
     "selected": [1, 2, 3, 4, 5],
     "subjects_per_super_subject": 12,
@@ -9,11 +9,11 @@
   "sessions": ["session1"],
   "tasks": ["eyesclosed","music"],
   "time_window": {
-    "t_start": 100.0,
-    "t_end": 200.0
+    "t_start": 0.0,
+    "t_end": 300.0
   },
   "cdhsa_params": {
-    "L": 20,
+    "L": 10,
     "hankel_depth": 10,
     "l_freq": 1.0,
     "h_freq": 40.0,

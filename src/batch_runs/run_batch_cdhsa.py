@@ -4,50 +4,52 @@ run_batch_cdhsa.py
 ====================
 Batch executor for the **CD-HSA** pipeline.
 
-Iterates over (super-subject x session) combinations and dispatches each
-as a subprocess call to ``run_cdhsa.py`` (single-super-subject mode, S=1).
+Supports two execution modes controlled by the JSON configuration:
 
-It is a sibling of ``run_batch_multi_method_super_subject.py`` and shares
-its structure (checkpoint, CSV log, post-processing comparison), differing
-only in that:
+**Multi-SS mode** (recommended, new)::
 
-* Each job invokes ``run_cdhsa.py`` with ``--super-subject-id`` (S=1)
-  and passes **all tasks** to a single invocation (CD-HSA analyses
-  cross-condition structure).
+  A single invocation of ``run_cdhsa.py`` with all super-subjects
+  together (S=N, C=tasks).  CD-HSA finds common directions across
+  subjects AND condition-specific modes with full cross-subject
+  statistical support (permutation tests, prevalence, A6 rank).
 
-* The ``methods`` block is replaced by a ``cdhsa_params`` block with
-  CD-HSA-specific parameters (L, fixed_rank, a6_n_null, bc_n_perm, …).
+  Triggered when ``super_subjects.n_super_subjects`` is present.
 
-* Post-processing reads per-super-subject ``cdhsa_summary.txt`` and
-  ``config.json`` files and compiles a cross-super-subject comparison.
+**Per-SS mode** (legacy)::
+
+  Iterates over super-subjects and dispatches each as a subprocess
+  call to ``run_cdhsa.py`` with ``--super-subject-id`` (S=1).
+
+  Triggered when ``super_subjects.selected`` is present.
 
 Configuration
 --------------
 Everything is controlled by the JSON file (default:
-``./cdhsa_batch_params.json``).  The fields are::
+``./cdhsa_batch_params.json``).
+
+Multi-SS JSON example::
 
     {
-      "experiment_label": "per_ss_condition_modes_comparison",
+      "experiment_label": "multiss_cdhsa_5ss_5tasks",
       "super_subjects": {
-          "selected": [1, 2, 3],
-          "subjects_per_super_subject": 20,
+          "n_super_subjects": 5,
+          "subjects_per_super_subject": 12,
           "subject_start_offset": 1,
-          "total_subjects": 60,
-          "groups": { ... }  // optional explicit override
+          "total_subjects": 60
       },
       "sessions": ["session1"],
-      "tasks": ["eyesclosed", "music"],
-      "time_window": { "t_start": 0.0, "t_end": 60.0 },
+      "tasks": ["eyesclosed", "eyesopen", "music", "memory", "mathematic"],
+      "time_window": { "t_start": 0.0, "t_end": 300.0 },
       "cdhsa_params": {
           "L": 27, "hankel_depth": 10,
           "l_freq": 1.0, "h_freq": 40.0,
-          "fixed_rank": 25, "rank_method": "reproducibility",
+          "fixed_rank": 25, "rank_method": "fixed",
           "a6_n_null": 500, "bc_n_perm": 5000,
           "skip_bc": false, "skip_tangent": false, "skip_d": false
       },
       "execution": {
-          "max_workers": 1, "delay": 2.0,
-          "run_comparison": true
+          "max_workers": 1, "delay": 0.0,
+          "run_comparison": false
       }
     }
 
@@ -124,21 +126,35 @@ def _load_params(json_path: Path) -> dict:
             sys.exit(1)
 
     ss_cfg = params["super_subjects"]
-    if "selected" not in ss_cfg:
+
+    # Detect mode: multi-SS (n_super_subjects) vs per-SS (selected)
+    is_multi_ss = "n_super_subjects" in ss_cfg
+    is_per_ss = "selected" in ss_cfg
+
+    if not is_multi_ss and not is_per_ss:
         logger.error(
-            "El bloque 'super_subjects' debe contener 'selected' (lista de ids)."
+            "El bloque 'super_subjects' debe contener 'n_super_subjects' (modo multi-SS) "
+            "o 'selected' (modo per-SS legacy)."
         )
         sys.exit(1)
-    if not isinstance(ss_cfg["selected"], list) or not ss_cfg["selected"]:
-        logger.error("'super_subjects.selected' debe ser una lista no vacia.")
-        sys.exit(1)
 
-    # If 'groups' is not provided, 'subjects_per_super_subject' must be set
-    if "groups" not in ss_cfg:
-        if "subjects_per_super_subject" not in ss_cfg:
+    if is_per_ss:
+        if not isinstance(ss_cfg["selected"], list) or not ss_cfg["selected"]:
+            logger.error("'super_subjects.selected' debe ser una lista no vacia.")
+            sys.exit(1)
+        # If 'groups' is not provided, 'subjects_per_super_subject' must be set
+        if "groups" not in ss_cfg:
+            if "subjects_per_super_subject" not in ss_cfg:
+                logger.error(
+                    "Se requiere 'subjects_per_super_subject' cuando 'groups' "
+                    "no esta definido en 'super_subjects'."
+                )
+                sys.exit(1)
+    else:
+        # multi-SS mode
+        if "total_subjects" not in ss_cfg:
             logger.error(
-                "Se requiere 'subjects_per_super_subject' cuando 'groups' "
-                "no esta definido en 'super_subjects'."
+                "En modo multi-SS, 'super_subjects.total_subjects' es requerido."
             )
             sys.exit(1)
 
@@ -197,17 +213,44 @@ def _resolve_subject_ids_for_job(
 def _generate_jobs(params: dict) -> list[dict]:
     """Generate the list of jobs from the JSON parameters.
 
-    Each job corresponds to a (super-subject, session) pair.  All tasks
-    are passed together to a single invocation of ``run_cdhsa.py``.
+    **Multi-SS mode** (``n_super_subjects`` in JSON):
+        One job per session.  All super-subjects are passed together
+        to a single invocation of ``run_cdhsa.py`` (S=N, C=tasks).
+
+    **Per-SS mode** (``selected`` in JSON, legacy):
+        One job per (super-subject, session) pair (S=1 each).
     """
     ss_cfg = params["super_subjects"]
-    selected_ids: list[int] = list(ss_cfg["selected"])
     sessions = params["sessions"]
     tasks = params["tasks"]
     tw = params["time_window"]
     cdhsa = params["cdhsa_params"]
+    t_start = str(tw["t_start"])
+    t_end = str(tw["t_end"])
 
     jobs: list[dict] = []
+
+    # --- Multi-SS mode ---
+    if "n_super_subjects" in ss_cfg:
+        n_ss = ss_cfg["n_super_subjects"]
+        for session in sessions:
+            jobs.append({
+                "mode": "multi_ss",
+                "n_super_subjects": n_ss,
+                "subjects_per_super_subject": ss_cfg.get("subjects_per_super_subject"),
+                "subject_start_offset": ss_cfg.get("subject_start_offset", 1),
+                "total_subjects": ss_cfg["total_subjects"],
+                "session": session,
+                "tasks": tasks,
+                "cdhsa_params": cdhsa,
+                "ss_cfg": ss_cfg,
+                "t_start": t_start,
+                "t_end": t_end,
+            })
+        return jobs
+
+    # --- Per-SS mode (legacy) ---
+    selected_ids: list[int] = list(ss_cfg["selected"])
     for sid in selected_ids:
         ss_label = _super_subject_label(sid)
         try:
@@ -218,6 +261,7 @@ def _generate_jobs(params: dict) -> list[dict]:
 
         for session in sessions:
             jobs.append({
+                "mode": "per_ss",
                 "super_subject_id": sid,
                 "super_subject_label": ss_label,
                 "subject_ids": subject_ids,
@@ -225,8 +269,8 @@ def _generate_jobs(params: dict) -> list[dict]:
                 "tasks": tasks,
                 "cdhsa_params": cdhsa,
                 "ss_cfg": ss_cfg,
-                "t_start": str(tw["t_start"]),
-                "t_end": str(tw["t_end"]),
+                "t_start": t_start,
+                "t_end": t_end,
             })
     return jobs
 
@@ -240,7 +284,7 @@ class CDHSABatchRunner:
     """Orchestrates batch execution of the CD-HSA pipeline."""
 
     CSV_FIELDS = [
-        "timestamp", "super_subject", "session", "tasks",
+        "timestamp", "mode", "super_subject", "session", "tasks",
         "L", "fixed_rank", "hankel_depth",
         "t_start", "t_end", "success", "returncode",
         "elapsed_s", "command",
@@ -315,14 +359,20 @@ class CDHSABatchRunner:
     # ------------------------------------------------------------------
 
     def _print_banner(self) -> None:
-        n_ss = len({j["super_subject_id"] for j in self.all_jobs})
+        is_multi_ss = any(j.get("mode") == "multi_ss" for j in self.all_jobs)
         n_sessions = len({j["session"] for j in self.all_jobs})
-        n_tasks = len({tuple(j["tasks"]) for j in self.all_jobs})
+        n_tasks = len(self.params["tasks"])
         cdhsa = self.params["cdhsa_params"]
         tw = self.params["time_window"]
 
         logger.info("=" * 70)
-        logger.info("  BATCH CD-HSA -- Pipeline de analisis de subespacios comunes")
+        if is_multi_ss:
+            n_ss = self.ss_cfg["n_super_subjects"]
+            spp = self.ss_cfg.get("subjects_per_super_subject")
+            logger.info("  BATCH CD-HSA -- MODO MULTI-SS (S=%d, C=%d)", n_ss, n_tasks)
+        else:
+            n_ss = len({j["super_subject_id"] for j in self.all_jobs})
+            logger.info("  BATCH CD-HSA -- MODO PER-SS (S=1 por job, %d SS)", n_ss)
         logger.info("=" * 70)
         logger.info("  Pipeline script : %s", self.pipeline_script)
         logger.info("  DB path         : %s", self.db_path or "(default)")
@@ -330,27 +380,33 @@ class CDHSABatchRunner:
         logger.info("  Cache dir       : %s", self.cache_dir)
         logger.info("  Checkpoint      : %s", self._checkpoint_path())
         logger.info("  ---")
-        logger.info(
-            "  Super-subjects  : %d  -> %s",
-            n_ss, sorted({j["super_subject_id"] for j in self.all_jobs}),
-        )
-        if "groups" in self.ss_cfg:
-            logger.info("  Groups mode     : explicit (groups block in JSON)")
-            for sid in self.ss_cfg["selected"]:
-                ids = _resolve_subject_ids_for_job(sid, self.ss_cfg)
-                logger.info(
-                    "    %s -> %d subjects [%d..%d]",
-                    _super_subject_label(sid), len(ids or []),
-                    (ids or [0])[0], (ids or [0])[-1],
-                )
+        if is_multi_ss:
+            logger.info("  Super-subjects  : %d", n_ss)
+            logger.info("  Subjects/SS     : %d (offset %d)",
+                        spp, self.ss_cfg.get("subject_start_offset", 1))
+            logger.info("  Total subjects  : %d", self.ss_cfg["total_subjects"])
         else:
             logger.info(
-                "  Auto-resolve    : %d subjects per super-subject (offset %d)",
-                self.ss_cfg.get("subjects_per_super_subject", 20),
-                self.ss_cfg.get("subject_start_offset", 1),
+                "  Super-subjects  : %d  -> %s",
+                n_ss, sorted({j["super_subject_id"] for j in self.all_jobs}),
             )
+            if "groups" in self.ss_cfg:
+                logger.info("  Groups mode     : explicit (groups block in JSON)")
+                for sid in self.ss_cfg["selected"]:
+                    ids = _resolve_subject_ids_for_job(sid, self.ss_cfg)
+                    logger.info(
+                        "    %s -> %d subjects [%d..%d]",
+                        _super_subject_label(sid), len(ids or []),
+                        (ids or [0])[0], (ids or [0])[-1],
+                    )
+            else:
+                logger.info(
+                    "  Auto-resolve    : %d subjects per super-subject (offset %d)",
+                    self.ss_cfg.get("subjects_per_super_subject", 20),
+                    self.ss_cfg.get("subject_start_offset", 1),
+                )
         logger.info("  Sessions        : %s", self.params["sessions"])
-        logger.info("  Tasks           : %s", self.params["tasks"])
+        logger.info("  Tasks (C)       : %s", self.params["tasks"])
         logger.info("  Time window     : %.1f s -> %.1f s (per subject)",
                     tw["t_start"], tw["t_end"])
         logger.info("  ---")
@@ -367,15 +423,12 @@ class CDHSABatchRunner:
         logger.info("    skip_tangent   : %s", cdhsa.get("skip_tangent", False))
         logger.info("    skip_d         : %s", cdhsa.get("skip_d", False))
         logger.info("  ---")
-        logger.info(
-            "  Total jobs  : %d (%d ss x %d sess)",
-            len(self.all_jobs), n_ss, n_sessions,
-        )
-        logger.info("  Delay       : %.1f s", self.delay)
-        logger.info("  Max workers : %d (%s)",
+        logger.info("  Total jobs      : %d", len(self.all_jobs))
+        logger.info("  Delay           : %.1f s", self.delay)
+        logger.info("  Max workers     : %d (%s)",
                     self.max_workers,
                     "paralelo" if self.max_workers > 1 else "secuencial")
-        logger.info("  Comparison  : %s", self.run_comparison)
+        logger.info("  Comparison      : %s", self.run_comparison)
         logger.info("=" * 70)
 
     # ------------------------------------------------------------------
@@ -412,12 +465,16 @@ class CDHSABatchRunner:
             logger.warning("No se pudo guardar checkpoint: %s", exc)
 
     @staticmethod
-    def _checkpoint_key(super_subject_id: int, session: str,
-                        tasks: tuple[str, ...],
-                        t_start: str, t_end: str) -> str:
-        tasks_str = "+".join(tasks)
-        return (f"ss{super_subject_id:02d}|{session}|{tasks_str}|"
-                f"{t_start}|{t_end}")
+    def _checkpoint_key(job: dict) -> str:
+        """Build a unique checkpoint key from a job dict."""
+        tasks_str = "+".join(job["tasks"])
+        if job.get("mode") == "multi_ss":
+            return (f"multiss_{job['n_super_subjects']}|{job['session']}|"
+                    f"{tasks_str}|{job['t_start']}|{job['t_end']}")
+        else:
+            sid = job["super_subject_id"]
+            return (f"ss{sid:02d}|{job['session']}|{tasks_str}|"
+                    f"{job['t_start']}|{job['t_end']}")
 
     # ------------------------------------------------------------------
     # CSV log
@@ -440,7 +497,11 @@ class CDHSABatchRunner:
                 writer = csv.DictWriter(fh, fieldnames=self.CSV_FIELDS)
                 writer.writerow({
                     "timestamp": datetime.now().isoformat(),
-                    "super_subject": job["super_subject_label"],
+                    "mode": job.get("mode", "per_ss"),
+                    "super_subject": job.get(
+                        "super_subject_label",
+                        f"multi-SS({job.get('n_super_subjects', '?')})"
+                    ),
                     "session": job["session"],
                     "tasks": "+".join(job["tasks"]),
                     "L": job["cdhsa_params"].get("L", ""),
@@ -463,14 +524,12 @@ class CDHSABatchRunner:
     def _filter_todo(self, jobs: list[dict]) -> list[dict]:
         todo: list[dict] = []
         for job in jobs:
-            key = self._checkpoint_key(
-                job["super_subject_id"], job["session"],
-                tuple(job["tasks"]), job["t_start"], job["t_end"],
-            )
+            key = self._checkpoint_key(job)
             if key in self.checkpoint:
+                label = job.get("super_subject_label", "multi-SS")
                 logger.debug(
                     "SKIP (checkpoint): %s/%s",
-                    job["super_subject_label"], job["session"],
+                    label, job["session"],
                 )
                 continue
             todo.append(job)
@@ -484,9 +543,10 @@ class CDHSABatchRunner:
     # ------------------------------------------------------------------
 
     def _build_command(self, job: dict) -> list[str]:
-        """Build the subprocess command for a single CD-HSA job.
+        """Build the subprocess command for a CD-HSA job.
 
-        Invokes ``run_cdhsa.py`` in single-super-subject mode.
+        Multi-SS mode: ``--n-super-subjects`` (S=N, all SS together).
+        Per-SS mode:  ``--super-subject-id`` (S=1, legacy).
         """
         cdhsa = job["cdhsa_params"]
         ss_cfg = job["ss_cfg"]
@@ -494,27 +554,42 @@ class CDHSABatchRunner:
         cmd = [
             sys.executable,
             str(self.pipeline_script),
-            "--super-subject-id", str(job["super_subject_id"]),
             "--session", job["session"],
         ]
 
-        # Tasks (positional, multiple)
+        # --- Mode selection (mutually exclusive in run_cdhsa.py CLI) ---
+        if job.get("mode") == "multi_ss":
+            cmd.extend([
+                "--n-super-subjects", str(job["n_super_subjects"]),
+                "--total-subjects", str(job["total_subjects"]),
+            ])
+            if job.get("subjects_per_super_subject") is not None:
+                cmd.extend([
+                    "--subjects-per-super-subject",
+                    str(job["subjects_per_super_subject"]),
+                ])
+            if job.get("subject_start_offset", 1) != 1:
+                cmd.extend([
+                    "--subject-start-offset",
+                    str(job["subject_start_offset"]),
+                ])
+        else:
+            # Per-SS legacy
+            cmd.extend([
+                "--super-subject-id", str(job["super_subject_id"]),
+            ])
+            if job.get("subject_ids") is not None:
+                pass  # groups handled by pipeline
+            cmd.extend([
+                "--subjects-per-super-subject",
+                str(ss_cfg.get("subjects_per_super_subject", 20)),
+                "--subject-start-offset",
+                str(ss_cfg.get("subject_start_offset", 1)),
+            ])
+
+        # Tasks (multiple)
         for task in job["tasks"]:
             cmd.extend(["--tasks", task])
-
-        # Subjects-per-super-subject / explicit subject-ids
-        if job.get("subject_ids") is not None:
-            # When groups is declared, we still pass auto-resolve params
-            # because run_cdhsa.py does not have --subject-ids.
-            # The groups are handled by the pipeline's own resolution.
-            pass
-
-        cmd.extend([
-            "--subjects-per-super-subject",
-            str(ss_cfg.get("subjects_per_super_subject", 20)),
-            "--subject-start-offset",
-            str(ss_cfg.get("subject_start_offset", 1)),
-        ])
 
         # Time window
         cmd.extend([
@@ -560,12 +635,8 @@ class CDHSABatchRunner:
     def _get_output_dir(self, job: dict) -> Path:
         """Return the directory where the pipeline saves results.
 
-        Mirrors the path scheme in ``run_cdhsa.py``'s ``_resolve_out_dir()``::
-
-            {BASE_RESULTS_PATH}/cdhsa/{session}/
-                SS{ss_id}_L{L}_fr{fr}_a6n{a6}_bcn{bc}/
-                {l_freq}-{h_freq}Hz_depth{d}/
-                from{t_start}s_to{t_end}s_{tasks}
+        Mirrors the path scheme in ``run_cdhsa.py``'s ``_resolve_out_dir()``.
+        Multi-SS uses ``nSS{N}``, per-SS uses ``SS{id}``.
         """
         if not self.output_dir:
             return Path(".")
@@ -577,7 +648,6 @@ class CDHSABatchRunner:
         t_start_tag = tw["t_start"] if tw["t_start"] != "None" else "any"
         t_end_tag = tw["t_end"] if tw["t_end"] != "None" else "any"
 
-        ss_id = job["super_subject_id"]
         L = cdhsa["L"]
         fr = cdhsa.get("fixed_rank", 10)
         a6n = cdhsa.get("a6_n_null", 100)
@@ -586,9 +656,15 @@ class CDHSABatchRunner:
         h_freq = cdhsa.get("h_freq", 40.0)
         depth = cdhsa.get("hankel_depth", "auto")
 
+        if job.get("mode") == "multi_ss":
+            n_ss = job["n_super_subjects"]
+            ss_label = f"nSS{n_ss}"
+        else:
+            ss_label = f"SS{job['super_subject_id']}"
+
         out_dir = Path(
             f"{self.output_dir}/cdhsa/{job['session']}"
-            f"/SS{ss_id}_L{L}"
+            f"/{ss_label}_L{L}"
             f"_fr{fr}_a6n{a6n}_bcn{bcn}"
             f"/{l_freq}-{h_freq}Hz"
             f"_depth{depth}"
@@ -602,23 +678,22 @@ class CDHSABatchRunner:
     # ------------------------------------------------------------------
 
     def _run_single_job(self, job: dict) -> tuple[str, bool]:
-        key = self._checkpoint_key(
-            job["super_subject_id"], job["session"],
-            tuple(job["tasks"]), job["t_start"], job["t_end"],
-        )
+        key = self._checkpoint_key(job)
 
         try:
             cmd = self._build_command(job)
         except Exception as exc:
+            label = job.get("super_subject_label", "multi-SS")
             logger.error(
                 "Error construyendo comando para %s/%s: %s",
-                job["super_subject_label"], job["session"], exc,
+                label, job["session"], exc,
             )
             return key, False
 
+        label = job.get("super_subject_label", f"multi-SS(S={job.get('n_super_subjects', '?')})")
         logger.info(
             "RUN | %s/%s | tasks=%s | L=%d | [%s-%s] s",
-            job["super_subject_label"], job["session"],
+            label, job["session"],
             "+".join(job["tasks"]),
             job["cdhsa_params"]["L"],
             job["t_start"], job["t_end"],
@@ -651,12 +726,12 @@ class CDHSABatchRunner:
             if success:
                 logger.info(
                     "OK | %s/%s (%.1f s)",
-                    job["super_subject_label"], job["session"], elapsed,
+                    label, job["session"], elapsed,
                 )
             else:
                 logger.error(
                     "ERROR | %s/%s -- codigo %d",
-                    job["super_subject_label"], job["session"],
+                    label, job["session"],
                     proc.returncode,
                 )
 
@@ -666,7 +741,7 @@ class CDHSABatchRunner:
             elapsed = time.time() - t0
             logger.error(
                 "EXCEPTION | %s/%s: %s",
-                job["super_subject_label"], job["session"], exc,
+                label, job["session"], exc,
             )
             self._write_csv_log(
                 job, False, -1, elapsed, cmd_for_log,
