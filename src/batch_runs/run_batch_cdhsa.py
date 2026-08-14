@@ -283,6 +283,8 @@ def _generate_jobs(params: dict) -> list[dict]:
 class CDHSABatchRunner:
     """Orchestrates batch execution of the CD-HSA pipeline."""
 
+    DEFAULT_PIPELINE_MODULE = "src.pipelines.run_cdhsa"
+
     CSV_FIELDS = [
         "timestamp", "mode", "super_subject", "session", "tasks",
         "L", "fixed_rank", "hankel_depth",
@@ -290,9 +292,11 @@ class CDHSABatchRunner:
         "elapsed_s", "command",
     ]
 
-    def __init__(self, params: dict, *, pipeline_script: Path | None = None) -> None:
+    def __init__(self, params: dict, *, pipeline_script: Path | None = None,
+                 pipeline_module: str | None = None) -> None:
         self.params = params
         self.pipeline_script = pipeline_script or (_SCRIPT_DIR.parent / "pipelines" / "run_cdhsa.py")
+        self.pipeline_module = pipeline_module or self.DEFAULT_PIPELINE_MODULE
         self.ss_cfg = params["super_subjects"]
         self.exec_cfg = params.get("execution", {})
 
@@ -552,8 +556,7 @@ class CDHSABatchRunner:
         ss_cfg = job["ss_cfg"]
 
         cmd = [
-            sys.executable,
-            str(self.pipeline_script),
+            sys.executable, "-m", self.pipeline_module,
             "--session", job["session"],
         ]
 
