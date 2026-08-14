@@ -37,6 +37,7 @@
   "execution": {
     "max_workers": 1,
     "delay": 0.0,
-    "run_comparison": false
+    "run_comparison": false,
+    "mode_extract_top_n": 2
   }
 }

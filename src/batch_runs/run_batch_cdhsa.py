@@ -331,12 +331,14 @@ class CDHSABatchRunner:
         try:
             from src.utils.config import (
                 BASE_CACHE_PATH,
+                BASE_PARAMS_FILE,
                 BASE_RESULTS_PATH,
                 DB_TEST_RETEST_GEDAI_PATH,
             )
             self.db_path = str(DB_TEST_RETEST_GEDAI_PATH)
             self.output_dir = Path(BASE_RESULTS_PATH)
             self.cache_dir = Path(BASE_CACHE_PATH)
+            self.params_dir = Path(BASE_PARAMS_FILE)
         except ImportError:
             logger.info(
                 "src.utils.config no disponible; usando rutas por defecto. "
@@ -344,6 +346,7 @@ class CDHSABatchRunner:
             )
             self.output_dir = Path("./results")
             self.cache_dir = Path("./cache")
+            self.params_dir = Path("./params")
 
     def _resolve_log_path(self) -> Path:
         """Resolve the path for the batch CSV log file."""
@@ -875,6 +878,119 @@ class CDHSABatchRunner:
         logger.info("  Con datos faltantes   : %d sesiones", reports_missing)
 
     # ------------------------------------------------------------------
+    # Post-processing: extract mode indices JSON
+    # ------------------------------------------------------------------
+
+    def _run_mode_extraction(self) -> None:
+        """Run src.cdhsa.extract_mode_indices for every job with results.
+
+        Executes the mode-extraction script even when all jobs were
+        skipped due to the checkpoint cache, so that mode_map.json
+        is always generated/updated from the latest results on disk.
+
+        The output JSON is saved under ``self.params_dir`` (i.e.
+        ``BASE_PARAMS_FILE`` from ``src.utils.config``).
+        """
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("  EXTRAYENDO INDICES DE MODOS ESPECIFICOS (mode_map.json)")
+        logger.info("=" * 70)
+
+        if not self.params_dir:
+            logger.warning(
+                "No se definio params_dir; no se puede guardar mode_map.json"
+            )
+            return
+
+        self.params_dir.mkdir(parents=True, exist_ok=True)
+
+        top_n = self.params.get("execution", {}).get("mode_extract_top_n", 2)
+
+        n_ok = 0
+        n_skip = 0
+        n_fail = 0
+
+        for job in self.all_jobs:
+            out_dir = self._get_output_dir(job)
+
+            # Verify the results directory has the required files
+            if not (out_dir / "cdhsa_arrays.npz").exists():
+                logger.debug(
+                    "SKIP (sin cdhsa_arrays.npz): %s", out_dir
+                )
+                n_skip += 1
+                continue
+
+            # Build a descriptive output filename
+            tasks_tag = "_".join(job["tasks"])
+            tw_tag = f"{job['t_start']}s-{job['t_end']}s"
+            json_name = (
+                f"mode_map_{job['session']}_{tasks_tag}_{tw_tag}.json"
+            )
+            json_out = self.params_dir / json_name
+
+            # Build command to run the extraction script as a module
+            cmd = [
+                sys.executable, "-m", "src.cdhsa.extract_mode_indices",
+                "--results-dir", str(out_dir),
+                "--top-n", str(top_n),
+                "-o", str(json_out),
+            ]
+
+            label = job.get(
+                "super_subject_label",
+                f"multi-SS(S={job.get('n_super_subjects', '?')})",
+            )
+            logger.info(
+                "  EXTRACT | %s/%s -> %s",
+                label, job["session"], json_name,
+            )
+            logger.debug("CMD: %s", " ".join(cmd))
+
+            try:
+                child_env = os.environ.copy()
+                child_env["PYTHONUNBUFFERED"] = "1"
+
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=child_env,
+                )
+
+                for line in proc.stdout:
+                    logger.info("  [EXTRACT] %s", line.rstrip())
+
+                proc.wait()
+
+                if proc.returncode == 0:
+                    logger.info("  [OK] %s", json_out)
+                    n_ok += 1
+                else:
+                    logger.error(
+                        "  [FAIL] extract_mode_indices returncode=%d",
+                        proc.returncode,
+                    )
+                    n_fail += 1
+
+            except Exception as exc:
+                logger.error(
+                    "  [FAIL] %s/%s: %s",
+                    label, job["session"], exc,
+                )
+                n_fail += 1
+
+        logger.info("")
+        logger.info(
+            "  Extraccion de modos completada: "
+            "OK=%d, Skip=%d, Fail=%d",
+            n_ok, n_skip, n_fail,
+        )
+        if n_ok > 0:
+            logger.info("  JSONs guardados en: %s", self.params_dir)
+
+    # ------------------------------------------------------------------
     # Main orchestration
     # ------------------------------------------------------------------
 
@@ -893,6 +1009,7 @@ class CDHSABatchRunner:
 
         if total == 0:
             logger.info("Todos los jobs ya estan completados.")
+            self._run_mode_extraction()
             if self.run_comparison:
                 self._run_comparison()
             return 0
@@ -915,6 +1032,8 @@ class CDHSABatchRunner:
             completed, failed, total,
         )
         logger.info("Log CSV: %s", self.log_file)
+
+        self._run_mode_extraction()
 
         if self.run_comparison:
             self._run_comparison()
