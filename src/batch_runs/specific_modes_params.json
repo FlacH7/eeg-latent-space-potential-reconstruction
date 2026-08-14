@@ -9,15 +9,15 @@
   "sessions": ["session1"],
   "tasks": ["eyesclosed","music"],
   "time_window": {
-    "t_start": 100.0,
-    "t_end": 200.0
+    "t_start": 0.0,
+    "t_end": 300.0
   },
   "cdhsa_params": {
-    "L": 27,
+    "L": 20,
     "hankel_depth": 10,
     "l_freq": 1.0,
     "h_freq": 40.0,
-    "fixed_rank": 25,
+    "fixed_rank": 15,
     "rank_method": "fixed",
     "skip_bc": false,
     "skip_tangent": false,
