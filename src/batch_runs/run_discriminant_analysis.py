@@ -99,7 +99,10 @@ def compute_discriminant_directions(
     C = len(H_list)
     d = H_list[0].shape[0]
 
-    # Covarianzas
+    # Covarianzas (segundo momento: H @ H^T / K)
+    # Nota: los datos EEG estan en Voltios (~10 uV), por lo que
+    # los elementos de la covarianza son ~1e-12 V^2.  Las
+    # diferencias entre tareas son una fraccion de eso.
     covs: list[NDArray] = []
     Ks: list[int] = []
     for H in H_list:
@@ -109,11 +112,24 @@ def compute_discriminant_directions(
 
     # Covarianza pooled (promedio simple)
     cov_pool = np.mean(covs, axis=0)  # (d, d)
+    pool_norm = float(np.linalg.norm(cov_pool, "fro"))
+
+    # Diagnostico de escala
+    cov_norms = [float(np.linalg.norm(c, "fro")) for c in covs]
+    logger.info(
+        "    Escala: ||Sigma_pool||_F = %.3e  |  "
+        "||Sigma_c||_F por tarea: %s",
+        pool_norm,
+        [f"{n:.3e}" for n in cov_norms],
+    )
 
     results: dict[str, dict[str, Any]] = {}
     for c, (cov_c, name) in enumerate(zip(covs, task_names)):
         Delta = cov_c - cov_pool  # (d, d)
         Delta_norm = float(np.linalg.norm(Delta, "fro"))
+
+        # Fraccion relativa de la covarianza pooled
+        rel_delta = Delta_norm / pool_norm if pool_norm > 0 else 0.0
 
         # SVD completo (d es ~530, esto es instantaneo)
         U, S, _Vt = np.linalg.svd(Delta, full_matrices=False)
@@ -133,13 +149,15 @@ def compute_discriminant_directions(
             "explained_var_ratio": explained_ratio[:kk].copy(),
             "Delta_norm": Delta_norm,
             "Delta_fro_all": float(total_var ** 0.5),
+            "rel_delta": rel_delta,
+            "pool_norm": pool_norm,
         }
 
         logger.debug(
-            "  Tarea %-12s  ||Delta||_F=%.2f  "
+            "  Tarea %-12s  ||Delta||_F=%.3e  rel=%.4f  "
             "top-%d SVD: %s  expl_var: %s",
-            name, Delta_norm, kk,
-            [f"{s:.4f}" for s in S[:kk]],
+            name, Delta_norm, rel_delta, kk,
+            [f"{s:.3e}" for s in S[:kk]],
             [f"{r:.4f}" for r in explained_ratio[:kk]],
         )
 
@@ -275,10 +293,16 @@ def _format_ss_report(
         S = res["S"]
         evr = res["explained_var_ratio"]
         lines.append(f"  {task}:")
-        lines.append(f"    ||Delta||_F     = {res['Delta_norm']:.2f}")
+        lines.append(f"    ||Delta||_F     = {res['Delta_norm']:.3e}")
+        rel = res.get("rel_delta", 0.0)
+        pool_n = res.get("pool_norm", 0.0)
+        lines.append(
+            f"    ||Sigma_pool||  = {pool_n:.3e}"
+            f"    (rel: {rel*100:.4f}% del pool)"
+        )
         for i in range(min(k, len(S))):
             lines.append(
-                f"    dir {i+1}: sigma={S[i]:.4f}  "
+                f"    dir {i+1}: sigma={S[i]:.3e}  "
                 f"expl_var={evr[i]*100:.1f}%  "
                 f"U[:,{i}] norm={np.linalg.norm(U[:, i]):.6f}"
             )
@@ -905,13 +929,22 @@ class DiscriminantAnalysisRunner:
         self.all_directions[ss_id] = directions
 
         # Log resumen
+        pool_norm = list(directions.values())[0].get("pool_norm", 0.0)
+        if pool_norm > 0:
+            logger.info(
+                "    %-12s  ||Sigma_pool||=%.3e",
+                "(pooled)", pool_norm,
+            )
         for task in valid_tasks:
             res = directions[task]
+            rel = res.get("rel_delta", 0.0)
             logger.info(
-                "    %-12s  ||Delta||=%.1f  top-S=[%s]",
+                "    %-12s  ||Delta||=%.3e  (%.4f%% del pool)  "
+                "top-S=[%s]",
                 task,
                 res["Delta_norm"],
-                ", ".join(f"{s:.3f}" for s in res["S"]),
+                rel * 100,
+                ", ".join(f"{s:.3e}" for s in res["S"]),
             )
 
         # Liberar memoria de las Hankel
