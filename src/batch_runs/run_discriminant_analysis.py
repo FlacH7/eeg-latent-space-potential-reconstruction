@@ -601,6 +601,11 @@ class DiscriminantAnalysisRunner:
         self.db_path: str | None = None
         self._resolve_project_paths()
 
+        # Global channel intersection (two-pass)
+        self.global_channels: list[str] | None = None
+        if len(self.ss_cfg["selected"]) > 1:
+            self.global_channels = self._discover_global_channels()
+
         # Checkpoint
         self.checkpoint: set[str] = self._load_checkpoint()
 
@@ -609,6 +614,79 @@ class DiscriminantAnalysisRunner:
         self.all_directions: dict[int, dict[str, dict]] = {}
 
         self._print_banner()
+
+    # ------------------------------------------------------------------
+    # Global channel intersection (two-pass)
+    # ------------------------------------------------------------------
+
+    def _discover_global_channels(self) -> list[str]:
+        """Cargar headers de cada SS y calcular la interseccion global de canales.
+
+        Usa preload=False para no cargar datos en memoria — solo lee
+        los nombres de canales de cada super-sujeto.
+        """
+        from src.latent_space_extraction.super_subject_eeg import (
+            load_super_subject_eeg,
+        )
+
+        selected = list(self.ss_cfg["selected"])
+        session = self.sessions[0]
+        first_task = self.task_names[0]
+        sppss = self.ss_cfg.get("subjects_per_super_subject", 20)
+        offset = self.ss_cfg.get("subject_start_offset", 1)
+        tw = self.params["time_window"]
+
+        logger.info("")
+        logger.info("  PASS 0: Descubriendo canales globales...")
+        logger.info("  " + "-" * 50)
+
+        all_channel_sets: list[set[str]] = []
+
+        for ss_id in selected:
+            try:
+                raw = load_super_subject_eeg(
+                    super_subject_id=ss_id,
+                    session=session,
+                    task=first_task,
+                    subjects_per_super_subject=sppss,
+                    subject_start_offset=offset,
+                    db_path=self.db_path,
+                    t_start=tw.get("t_start"),
+                    t_stop=tw.get("t_end"),
+                    preload=False,
+                    verbose=False,
+                )
+                ch_set = set(raw.ch_names)
+                all_channel_sets.append(ch_set)
+                logger.info(
+                    "    SS%d: %d canales", ss_id, len(ch_set)
+                )
+                del raw
+            except Exception as exc:
+                logger.error(
+                    "    SS%d: ERROR al cargar canales: %s", ss_id, exc
+                )
+                # Agregar set vacio para no romper la interseccion
+                all_channel_sets.append(set())
+
+        # Interseccion global
+        global_ch = sorted(set.intersection(*all_channel_sets))
+
+        logger.info("  " + "-" * 50)
+        logger.info("    Interseccion global: %d canales", len(global_ch))
+
+        # Reportar canales excluidos por SS
+        for i, ss_id in enumerate(selected):
+            n_total = len(all_channel_sets[i])
+            n_kept = len(all_channel_sets[i] & set(global_ch))
+            n_excl = n_total - n_kept
+            if n_excl > 0:
+                logger.info(
+                    "    SS%d: %d canales excluidos (%d -> %d)",
+                    ss_id, n_excl, n_total, n_kept,
+                )
+
+        return global_ch
 
     # ------------------------------------------------------------------
     # Project paths
@@ -654,6 +732,13 @@ class DiscriminantAnalysisRunner:
         logger.info("  Hankel depth   : %s",
                     dp.get("hankel_depth", "auto"))
         logger.info("  Output dir     : %s", self.output_dir)
+        if self.global_channels is not None:
+            logger.info(
+                "  Canales globales: %d (two-pass)",
+                len(self.global_channels),
+            )
+        else:
+            logger.info("  Canales globales: N/A (1 solo SS)")
         logger.info("=" * 70)
 
     # ------------------------------------------------------------------
@@ -728,7 +813,7 @@ class DiscriminantAnalysisRunner:
 
     def _run_single_ss(self, ss_id: int, session: str) -> bool:
         """Construir Hankel + calcular direcciones de discriminancia + guardar."""
-        from src.pipelines.run_cdhsa import build_hankel_single_ss, characterize_hankel_matrices
+        from run_cdhsa import build_hankel_single_ss, characterize_hankel_matrices
 
         dp = self.params["discriminant_params"]
         tw = self.params["time_window"]
@@ -747,6 +832,11 @@ class DiscriminantAnalysisRunner:
 
         # 1. Construir Hankel
         logger.info("  [1/3] Construyendo matrices de Hankel...")
+        if self.global_channels is not None:
+            logger.info(
+                "         usando %d canales globales",
+                len(self.global_channels),
+            )
         try:
             X, hankel_info = build_hankel_single_ss(
                 super_subject_id=ss_id,
@@ -761,6 +851,7 @@ class DiscriminantAnalysisRunner:
                 h_freq=dp.get("h_freq", 40.0),
                 hankel_depth=dp.get("hankel_depth"),
                 verbose=False,
+                global_channels=self.global_channels,
             )
         except Exception as exc:
             logger.error("  ERROR construyendo Hankel: %s", exc)
@@ -835,6 +926,22 @@ class DiscriminantAnalysisRunner:
     def run(self) -> int:
         if self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Si hay checkpoint pero no global_channels, no podemos
+        # comparar con resultados viejos (d inconsistente).
+        # Invalidar checkpoint si no tenemos canales globales
+        # y hay mas de 1 SS seleccionado.
+        if (
+            self.global_channels is None
+            and len(self.ss_cfg["selected"]) > 1
+            and self.checkpoint
+        ):
+            logger.warning(
+                "  Invalidando checkpoint previo: se detecto"
+                " posible inconsistencia de canales."
+            )
+            self.checkpoint = set()
+            self._save_checkpoint()
 
         selected = list(self.ss_cfg["selected"])
         jobs = [

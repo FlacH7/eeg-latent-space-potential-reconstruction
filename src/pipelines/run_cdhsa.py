@@ -551,12 +551,20 @@ def build_hankel_single_ss(
     h_freq: float = 40.0,
     hankel_depth: int | None = None,
     verbose: bool | str | None = None,
+    global_channels: list[str] | None = None,
 ) -> tuple[list[list[NDArray[np.floating]]], dict]:
     """Construir matrices de Hankel para un UNICO super-sujeto (S=1).
 
     Carga el super-sujeto indicado para cada condicion, construye
-    la Hankel y retorna X con S=1.  No necesita interseccion
-    global de canales porque solo hay un super-sujeto.
+    la Hankel y retorna X con S=1.
+
+    Parameters
+    ----------
+    global_channels : list[str] | None
+        Si se proporciona, se hace ``raw.pick(global_channels)``
+        despues de cargar los datos, antes de filtrar y construir
+        la Hankel.  Esto garantiza una dimension ``d`` consistente
+        cuando se procesan multiples super-sujetos por separado.
     """
     from src.latent_space_extraction.super_subject_eeg import (
         load_super_subject_eeg,
@@ -628,6 +636,14 @@ def build_hankel_single_ss(
             shapes_s.append(None)
             skipped.append((0, c_idx, str(exc)))
             continue
+
+        # Restringir a canales globales si se proporcionan
+        if global_channels is not None:
+            available = [c for c in global_channels if c in raw.ch_names]
+            missing = set(global_channels) - set(raw.ch_names)
+            if missing:
+                print(f"WARN {len(missing)} canales globales faltantes")
+            raw.pick(available)
 
         sfreq = float(raw.info["sfreq"])
         duration_s = raw.times[-1]
@@ -870,7 +886,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--fixed-rank", type=int, default=10)
     g.add_argument("--rank-method", type=str, default="fixed",
                    choices=["fixed", "reproducibility"])
-    g.add_argument("--a6-n-null", type=int, default=500)
+    g.add_argument("--a6-n-null", type=int, default=100)
     g.add_argument("--bc-n-perm", type=int, default=5000)
     g.add_argument("--skip-bc", action="store_true")
     g.add_argument("--skip-tangent", action="store_true")
