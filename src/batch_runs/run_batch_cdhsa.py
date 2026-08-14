@@ -292,7 +292,7 @@ class CDHSABatchRunner:
 
     def __init__(self, params: dict, *, pipeline_script: Path | None = None) -> None:
         self.params = params
-        self.pipeline_script = pipeline_script or (_SCRIPT_DIR / "run_cdhsa.py")
+        self.pipeline_script = pipeline_script or (_SCRIPT_DIR.parent / "pipelines" / "run_cdhsa.py")
         self.ss_cfg = params["super_subjects"]
         self.exec_cfg = params.get("execution", {})
 
