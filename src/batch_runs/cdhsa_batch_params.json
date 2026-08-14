@@ -30,7 +30,8 @@
     "bc_n_perm": 5000,
     "skip_bc": false,
     "skip_tangent": false,
-    "skip_d": false
+    "skip_d": false,
+    "d_max_specific": 2
   },
 
   "execution": {

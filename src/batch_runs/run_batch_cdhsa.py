@@ -608,6 +608,7 @@ class CDHSABatchRunner:
             "--rank-method", str(cdhsa.get("rank_method", "fixed")),
             "--a6-n-null", str(cdhsa.get("a6_n_null", 100)),
             "--bc-n-perm", str(cdhsa.get("bc_n_perm", 5000)),
+            "--d-max-specific", str(cdhsa.get("d_max_specific", 10)),
         ])
 
         # Optional hankel depth

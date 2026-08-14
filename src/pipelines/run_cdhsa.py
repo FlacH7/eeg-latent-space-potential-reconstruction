@@ -888,6 +888,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    choices=["fixed", "reproducibility"])
     g.add_argument("--a6-n-null", type=int, default=100)
     g.add_argument("--bc-n-perm", type=int, default=5000)
+    g.add_argument("--d-max-specific", type=int, default=10,
+                   help="Maximos modos especificos por condicion (Step D). "
+                   "Default: 10")
     g.add_argument("--skip-bc", action="store_true")
     g.add_argument("--skip-tangent", action="store_true")
     g.add_argument("--skip-d", action="store_true")
@@ -1132,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
         a6_n_null=args.a6_n_null,
         bc_n_perm=args.bc_n_perm,
         bc_condition_names=list(args.tasks),
+        d_max_specific=args.d_max_specific,
         skip_bc=args.skip_bc,
         skip_tangent=args.skip_tangent,
         skip_d=args.skip_d,
