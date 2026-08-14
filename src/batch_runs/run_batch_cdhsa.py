@@ -590,9 +590,8 @@ class CDHSABatchRunner:
                 str(ss_cfg.get("subject_start_offset", 1)),
             ])
 
-        # Tasks (multiple)
-        for task in job["tasks"]:
-            cmd.extend(["--tasks", task])
+        # Tasks (all in a single --tasks invocation, since run_cdhsa.py uses nargs='+')
+        cmd.extend(["--tasks"] + job["tasks"])
 
         # Time window
         cmd.extend([
