@@ -813,7 +813,7 @@ class DiscriminantAnalysisRunner:
 
     def _run_single_ss(self, ss_id: int, session: str) -> bool:
         """Construir Hankel + calcular direcciones de discriminancia + guardar."""
-        from run_cdhsa import build_hankel_single_ss, characterize_hankel_matrices
+        from src.pipelines.run_cdhsa import build_hankel_single_ss, characterize_hankel_matrices
 
         dp = self.params["discriminant_params"]
         tw = self.params["time_window"]
