@@ -126,6 +126,7 @@ except ImportError as _exc:
 # is provided in the JSON).
 from src.latent_space_extraction.super_subject_eeg import (
     resolve_super_subject_subject_ids,
+    compute_channel_intersection,
 )
 
 # ---------------------------------------------------------------------------
@@ -381,7 +382,77 @@ class SuperSubjectBatchRunner:
 
         # Generate jobs
         self.all_jobs = _generate_jobs(params)
+
+        # ------------------------------------------------------------------
+        # Pre-compute global channel intersections per (session, task)
+        # ------------------------------------------------------------------
+        # When any method uses cdhsa_specific_modes, the W_specific modes
+        # were trained on the global channel intersection (e.g. 53
+        # channels).  Different super-subjects may have different local
+        # intersections (54, 55, ...), leading to Hankel matrices whose
+        # row dimensionality does not match W_specific.  We compute the
+        # global intersection once here and pass it to every job via
+        # --channel-intersection so the pipeline can restrict the Raw
+        # before building the Hankel.
+        self._needs_channel_intersection = any(
+            m["stage2_dynamics"] == "cdhsa_specific_modes"
+            for m in params["methods"]
+        )
+        self._channel_intersections: dict[tuple[str, str], list[str]] = {}
+        if self._needs_channel_intersection:
+            self._precompute_channel_intersections(params)
+
         self._print_banner()
+
+    # ------------------------------------------------------------------
+    # Pre-compute global channel intersections
+    # ------------------------------------------------------------------
+
+    def _precompute_channel_intersections(self, params: dict) -> None:
+        """Compute the global channel intersection for each (session, task).
+
+        The result is stored in ``self._channel_intersections`` and
+        injected into every job command via ``--channel-intersection``.
+        """
+        sessions = params["sessions"]
+        tasks = params["tasks"]
+        db_path = self.db_path
+
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("  PRE-COMPUTING GLOBAL CHANNEL INTERSECTIONS")
+        logger.info("=" * 70)
+
+        for session in sessions:
+            for task in tasks:
+                key = (session, task)
+                logger.info(
+                    "  Computing intersection for %s/%s ...", session, task,
+                )
+                try:
+                    intersection = compute_channel_intersection(
+                        session,
+                        task,
+                        ss_cfg=self.ss_cfg,
+                        db_path=db_path,
+                        verbose=True,
+                    )
+                    self._channel_intersections[key] = intersection
+                    logger.info(
+                        "  Global intersection %s/%s: %d channels",
+                        session, task, len(intersection),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "  Failed to compute intersection for %s/%s: %s. "
+                        "CD-HSA jobs for this combo may fail.",
+                        session, task, exc,
+                    )
+
+        logger.info("")
+        logger.info("  Channel intersections computed for %d (session, task) combos.",
+                     len(self._channel_intersections))
+        logger.info("=" * 70)
 
     # ------------------------------------------------------------------
     # Banner
@@ -705,6 +776,16 @@ class SuperSubjectBatchRunner:
 
         if shared.get("no_save_potential", False):
             cmd.append("--no-save-potential")
+
+        # --- Channel intersection (for CD-HSA dimensionality consistency) ---
+        if self._needs_channel_intersection:
+            ch_key = (job["session"], job["task"])
+            ch_inter = self._channel_intersections.get(ch_key)
+            if ch_inter is not None:
+                cmd.extend([
+                    "--channel-intersection",
+                    json.dumps(ch_inter),
+                ])
 
         return cmd
 

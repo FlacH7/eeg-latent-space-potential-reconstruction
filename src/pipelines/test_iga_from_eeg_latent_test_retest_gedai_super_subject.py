@@ -199,6 +199,16 @@ def _parse_args() -> argparse.Namespace:
         help="Task label (eyesclosed, eyesopen, mathematic, memory, music)",
     )
     parser.add_argument(
+        "--channel-intersection", type=str, default=None,
+        help=(
+            "JSON list of channel names representing the global channel "
+            "intersection across all super-subjects. When provided, the "
+            "concatenated raw is restricted to exactly these channels before "
+            "any processing. This ensures CD-HSA mode dimensionality "
+            "consistency across super-subjects with different channel counts."
+        ),
+    )
+    parser.add_argument(
         "--db-path", type=str, default=None,
         help="Override Gedai dataset root path",
     )
@@ -560,6 +570,31 @@ def main() -> int:
           f"(duration: {raw.times[-1] - raw.times[0]:.2f} s)")
 
     # -----------------------------------------------------------------
+    # Apply global channel intersection (CD-HSA consistency)
+    # -----------------------------------------------------------------
+    # When --channel-intersection is provided (by the batch runner),
+    # restrict the concatenated raw to exactly those channels.  This
+    # guarantees that the Hankel row dimensionality (n_channels * depth)
+    # matches the CD-HSA W_specific matrix across all super-subjects.
+    channel_intersection = None
+    if args.channel_intersection is not None:
+        channel_intersection = json.loads(args.channel_intersection)
+        if not isinstance(channel_intersection, list):
+            raise ValueError("--channel-intersection must be a JSON list of channel names")
+        # Validate that all requested channels exist in the raw
+        missing = [ch for ch in channel_intersection if ch not in raw.ch_names]
+        if missing:
+            raise ValueError(
+                f"--channel-intersection references {len(missing)} channels "
+                f"not found in raw: {missing[:5]}{'...' if len(missing) > 5 else ''}"
+            )
+        n_before = len(raw.ch_names)
+        raw.pick(channel_intersection)
+        print(f"  [ChannelIntersection] Applied global intersection: "
+              f"{n_before} -> {len(raw.ch_names)} channels")
+        sys.stdout.flush()
+
+    # -----------------------------------------------------------------
     # PSD of the original (concatenated) EEG channels
     # -----------------------------------------------------------------
     psds_raw, freqs_raw, ch_names, mean_psd, std_psd, raw_psd_path = compute_and_plot_raw_psd(
@@ -633,6 +668,7 @@ def main() -> int:
             h_freq=args.h_freq,
             n_workers=args.workers,
             verbose=verbose,
+            channel_intersection=channel_intersection,
         )
         sys.stdout.flush()
 

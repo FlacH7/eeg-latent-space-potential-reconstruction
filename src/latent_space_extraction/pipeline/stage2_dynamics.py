@@ -755,15 +755,12 @@ class CDHSASpecificModesDynamics:
     npz_path : str | None
         Explicit path to ``cdhsa_arrays.npz``.  When ``None``, the NPZ is
         resolved from the mode_map's ``metadata.source_dir``.
-    condition : str | None
+    condition : str
         Name of the target condition/task (e.g. ``"eyesclosed"``).
         **Auto-injected by the pipeline from ``--task``** via
         ``_resolve_pipeline_spec``.  Matched against the keys in the
         mode_map's ``conditions`` dict (which corresponds to
         ``metadata.tasks``).  When ``None``, the first condition is used.
-    condition_index : int | None
-        Fallback: 0-based index into the conditions list.  Ignored when
-        ``condition`` is provided (which is the normal path).
     top_n : int | None
         Number of specific modes to project onto.  When ``None`` the
         ``top_n_actual`` from the mode_map is used.
@@ -786,14 +783,12 @@ class CDHSASpecificModesDynamics:
         mode_map_path: str | None = None,
         npz_path: str | None = None,
         condition: str | None = None,
-        condition_index: int | None = None,
         top_n: int | None = None,
         n_components: int | None = None,
     ):
         self.mode_map_path = mode_map_path
         self.npz_path = npz_path
         self.condition = condition
-        self.condition_index = condition_index
         # n_components is the canonical Stage-2 name; allow both
         self.top_n = n_components if top_n is None else top_n
 
@@ -837,13 +832,12 @@ class CDHSASpecificModesDynamics:
             mode_map = json.load(f)
 
         # ------------------------------------------------------------------
-        # 2. Resolve condition
+        # 2. Resolve condition (auto-injected from --task by the pipeline)
         # ------------------------------------------------------------------
         conditions = mode_map["conditions"]
         tasks = list(conditions.keys())
         C = len(tasks)
 
-        # Priority: condition (name) > condition_index > 0 (first)
         if self.condition is not None:
             if self.condition not in conditions:
                 raise ValueError(
@@ -853,17 +847,13 @@ class CDHSASpecificModesDynamics:
             task_name = self.condition
             c_idx = tasks.index(task_name)
             print(f"  [Stage2/cdhsa_specific_modes] Resolved condition="
-                  f"'{task_name}' (index {c_idx}) from name")
+                  f"'{task_name}' (index {c_idx}) from --task")
         else:
-            c_idx = self.condition_index
-            if c_idx is None:
-                c_idx = 0
-            if c_idx < 0 or c_idx >= C:
-                raise ValueError(
-                    f"[Stage2/cdhsa_specific_modes] condition_index={c_idx} "
-                    f"out of range [0, {C}). Available conditions: {tasks}"
-                )
-            task_name = tasks[c_idx]
+            # Fallback: use the first condition
+            c_idx = 0
+            task_name = tasks[0]
+            print(f"  [Stage2/cdhsa_specific_modes] WARNING: no condition specified, "
+                  f"using first: '{task_name}' (index 0)")
 
         cond_info = conditions[task_name]
         mode_indices = cond_info["mode_indices_in_W"]
@@ -954,6 +944,20 @@ class CDHSASpecificModesDynamics:
         # Validate expected dimensionality
         p_hankel_expected = mode_map["metadata"]["p_hankel"]
         if p_hankel_expected is not None and p != p_hankel_expected:
+            # Check if a channel_intersection was applied
+            ch_inter = getattr(ctx, 'channel_intersection', None)
+            if ch_inter is not None:
+                n_ch_inter = len(ch_inter)
+                depth = ctx.stage1_meta.get("depth")
+                n_ch_actual = p // depth if (depth and p > 0) else 0
+                raise ValueError(
+                    f"[Stage2/cdhsa_specific_modes] Hankel row dim mismatch: "
+                    f"got {p}, CD-HSA expects {p_hankel_expected}. "
+                    f"Channel intersection was applied ({n_ch_inter} channels), "
+                    f"but the resulting Hankel ({n_ch_actual} ch x depth) still doesn't match. "
+                    f"Check that the hankel_depth and the CD-HSA training used the same "
+                    f"channel set and depth."
+                )
             print(f"  [Stage2/cdhsa_specific_modes] WARNING: Hankel row dim "
                   f"mismatch: got {p}, CD-HSA expects {p_hankel_expected}. "
                   f"Proceeding anyway — ensure the same hankel_depth was used.")
@@ -1028,6 +1032,11 @@ class CDHSASpecificModesDynamics:
             "n_time_lost_by_block_hankel": n_time_lost_block,
             "total_specific_modes": rc,
             "p_hankel": p,
+            "n_channels": ctx.stage1_meta.get("n_channels"),
+            "hankel_depth": ctx.stage1_meta.get("depth"),
+            "channel_intersection": (
+                list(ctx.channel_intersection) if ctx.channel_intersection else None
+            ),
             "elapsed_time": time.time() - t0,
             # Keep W_sel for plotting (channel-influence-like analysis)
             "W_sel": W_sel,

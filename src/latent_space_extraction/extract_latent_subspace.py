@@ -250,6 +250,8 @@ def extract_latent_space(
     # ---- Search / compute params ----
     n_workers: int | None = None,
     verbose: bool | str | None = None,
+    # ---- Channel intersection (CD-HSA consistency) ----
+    channel_intersection: list[str] | None = None,
     # ---- Legacy API (deprecated; mapped onto the stages above) ----
     scoring_method: str | None = None,
     fc_metric: str = DEFAULT_FC_METRIC,
@@ -395,6 +397,7 @@ def extract_latent_space(
         n_workers=n_workers,
         verbose=verbose,
         stage1_name=stage1_embedding,
+        channel_intersection=channel_intersection,
     )
 
     # =====================================================================

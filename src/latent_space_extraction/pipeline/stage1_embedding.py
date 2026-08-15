@@ -77,6 +77,10 @@ class PipelineContext:
     stage1_meta : dict
         Metadata emitted by Stage 1 (includes ``input_data`` — the
         original channel matrix — and ``depth`` for the Hankel variant).
+    channel_intersection : list[str] | None
+        Global channel intersection across all super-subjects (set by
+        the batch runner).  Used by CD-HSA strategies to validate that
+        the Hankel dimensionality matches the trained modes.
     """
 
     raw: Any = None
@@ -88,6 +92,7 @@ class PipelineContext:
     verbose: Any = None
     stage1_name: str | None = None
     stage1_meta: dict = field(default_factory=dict)
+    channel_intersection: list[str] | None = None
 
     @property
     def has_hankel(self) -> bool:
