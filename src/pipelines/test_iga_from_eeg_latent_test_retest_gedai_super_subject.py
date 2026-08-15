@@ -407,6 +407,10 @@ def _resolve_pipeline_spec(args: argparse.Namespace) -> dict:
             p2.setdefault("alpha", args.diffusion_alpha)
         if s2 == "pca_ica":
             p2.setdefault("ica_method", args.ica_method)
+        if s2 == "cdhsa_specific_modes":
+            # Auto-inject --task as condition so the mode_map resolves
+            # the correct condition index without the user specifying it.
+            p2.setdefault("condition", args.task)
         if s3 in ("markov_fastest", "markov_slowest"):
             p3.setdefault("n_bins", args.n_bins)
             p3.setdefault("search_strategy", args.search_strategy)

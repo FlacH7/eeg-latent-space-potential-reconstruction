@@ -755,15 +755,28 @@ class CDHSASpecificModesDynamics:
     npz_path : str | None
         Explicit path to ``cdhsa_arrays.npz``.  When ``None``, the NPZ is
         resolved from the mode_map's ``metadata.source_dir``.
+    condition : str | None
+        Name of the target condition/task (e.g. ``"eyesclosed"``).
+        **Auto-injected by the pipeline from ``--task``** via
+        ``_resolve_pipeline_spec``.  Matched against the keys in the
+        mode_map's ``conditions`` dict (which corresponds to
+        ``metadata.tasks``).  When ``None``, the first condition is used.
     condition_index : int | None
-        Index of the target condition in the mode_map (0-based).  When
-        ``None``, the first (and often only) condition is used.
+        Fallback: 0-based index into the conditions list.  Ignored when
+        ``condition`` is provided (which is the normal path).
     top_n : int | None
         Number of specific modes to project onto.  When ``None`` the
         ``top_n_actual`` from the mode_map is used.
     n_components : int | None
         Alias for ``top_n`` (for interface uniformity with other
         Stage-2 strategies).
+
+    Example ``stage2_params`` for the batch JSON::
+
+        {"mode_map_path": "params/mode_map_session1_eyesclosed_music_100.0s-200.0s.json"}
+
+    The pipeline injects ``"condition": args.task`` automatically,
+    so the same JSON works for all tasks in the batch.
     """
 
     name = "cdhsa_specific_modes"
@@ -772,12 +785,14 @@ class CDHSASpecificModesDynamics:
         self,
         mode_map_path: str | None = None,
         npz_path: str | None = None,
+        condition: str | None = None,
         condition_index: int | None = None,
         top_n: int | None = None,
         n_components: int | None = None,
     ):
         self.mode_map_path = mode_map_path
         self.npz_path = npz_path
+        self.condition = condition
         self.condition_index = condition_index
         # n_components is the canonical Stage-2 name; allow both
         self.top_n = n_components if top_n is None else top_n
@@ -828,16 +843,28 @@ class CDHSASpecificModesDynamics:
         tasks = list(conditions.keys())
         C = len(tasks)
 
-        c_idx = self.condition_index
-        if c_idx is None:
-            c_idx = 0
-        if c_idx < 0 or c_idx >= C:
-            raise ValueError(
-                f"[Stage2/cdhsa_specific_modes] condition_index={c_idx} "
-                f"out of range [0, {C}). Available conditions: {tasks}"
-            )
+        # Priority: condition (name) > condition_index > 0 (first)
+        if self.condition is not None:
+            if self.condition not in conditions:
+                raise ValueError(
+                    f"[Stage2/cdhsa_specific_modes] condition={self.condition!r} "
+                    f"not found in mode_map. Available: {tasks}"
+                )
+            task_name = self.condition
+            c_idx = tasks.index(task_name)
+            print(f"  [Stage2/cdhsa_specific_modes] Resolved condition="
+                  f"'{task_name}' (index {c_idx}) from name")
+        else:
+            c_idx = self.condition_index
+            if c_idx is None:
+                c_idx = 0
+            if c_idx < 0 or c_idx >= C:
+                raise ValueError(
+                    f"[Stage2/cdhsa_specific_modes] condition_index={c_idx} "
+                    f"out of range [0, {C}). Available conditions: {tasks}"
+                )
+            task_name = tasks[c_idx]
 
-        task_name = tasks[c_idx]
         cond_info = conditions[task_name]
         mode_indices = cond_info["mode_indices_in_W"]
 
