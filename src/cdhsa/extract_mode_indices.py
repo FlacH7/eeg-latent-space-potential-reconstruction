@@ -8,8 +8,9 @@ mas relevantes de esa condicion.
 
 Uso::
 
-    python extract_mode_indices.py --results-dir results/cdhsa/session1/nSS5_.../.../eyesclosed_music
-    python extract_mode_indices.py --results-dir <PATH> --top-n 2
+    python -m src.cdhsa.extract_mode_indices \
+        --results-dir results/cdhsa/session1/nSS5_.../.../eyesclosed_music
+    python -m src.cdhsa.extract_mode_indices --results-dir <PATH> --top-n 2
 
 El JSON de salida (mode_map.json) contiene, para cada condicion,
 los indices de los modos especificos ordenados por eigenvalor,
@@ -22,15 +23,15 @@ Step D de CD-HSA calcula, para cada condicion c:
 
   1. Residuos: R(s,c) = (I - U0 U0^T) H(s,c)  para cada SS s
   2. Covarianza residual pool: R_bar(c) = (1/S) sum_s R(s,c) R(s,c)^T
-  3. Descomposicion: R_bar(c) = Phi(c) Lambda(c) Phi(c)^T
-  4. Los modos especificos son las columnas de Phi(c) en R^p.
+  3. Descomposicion: R_bar(c) = W(c) Lambda(c) W(c)^T
+  4. Los modos especificos son las columnas de W(c) en R^p.
 
 Los modos son COMUNES a todos los super-sujetos dentro de una
 condicion (se calculan haciendo pooling sobre S super-sujetos).
 
 Para obtener las series temporales de dimension r_c de un par (s,c)::
 
-    alpha = Phi(c)^T @ H(s,c)   ->  shape (r_c, T)
+    alpha = W(c)^T @ H(s,c)   ->  shape (r_c, T)
 
 Las series se ordenan por eigenvalor (Lambda(c)) de mayor a menor.
 Tomar los top-n da las n series que mas capturan la dinamica
@@ -46,126 +47,11 @@ from pathlib import Path
 import numpy as np
 
 
-def _find_d_keys(npz_data: np.NpzFile) -> dict[str, list[tuple[str, tuple]]]:
-    """Clasificar todas las keys D__ del NPZ por su estructura.
-
-    Devuelve un dict como::
-        {
-            'scalar_keys': [('D__C', ()), ...],
-            'array_keys': [('D__r_specific', (5,)), ...],
-            'nested_dicts': {
-                'D__Phi_specific': ['0', '1', ...],  # sub-keys
-                'D__Lambda_specific': ['0', '1', ...],
-            }
-        }
-    """
-    all_keys = [k for k in npz_data.files if k.startswith('D__')]
-
-    scalar_keys = []
-    array_keys = []
-    nested_prefixes: dict[str, list[str]] = {}
-
-    for k in all_keys:
-        parts = k.split('__')
-        # D__C, D__r_specific -> len(parts) == 2
-        # D__Phi_specific__0 -> len(parts) == 3
-        # D__Phi_specific__0__extra -> len(parts) == 4
-
-        if len(parts) == 2:
-            # Top-level: D__key
-            shape = npz_data[k].shape
-            if shape == () or (len(shape) == 1 and shape[0] == 1):
-                scalar_keys.append((k, shape))
-            else:
-                array_keys.append((k, shape))
-        elif len(parts) >= 3:
-            # Nested: D__prefix__subkey
-            prefix = '__'.join(parts[:2])  # e.g. 'D__Phi_specific'
-            subkey = '__'.join(parts[2:])   # e.g. '0' or '0__extra'
-            if prefix not in nested_prefixes:
-                nested_prefixes[prefix] = []
-            nested_prefixes[prefix].append(subkey)
-
-    return {
-        'scalar_keys': scalar_keys,
-        'array_keys': array_keys,
-        'nested_dicts': nested_prefixes,
-    }
-
-
-def _identify_mode_arrays(
-    d_info: dict,
-    n_conditions: int,
-) -> dict[int, str]:
-    """Identificar cual key anidada contiene los modos Phi por condicion.
-
-    Busca keys anidadas donde los sub-keys sean strings numericos 0..C-1
-    y cada array tenga shape (p, r_c) con p grande y r_c variable.
-
-    Returns dict {condition_idx: npz_key}  o dict vacio si no se encuentran.
-    """
-    nested = d_info['nested_dicts']
-    candidates = []
-
-    for prefix, subkeys in nested.items():
-        # Verificar que los sub-keys son numericos consecutivos
-        try:
-            indices = sorted(int(sk) for sk in subkeys)
-        except ValueError:
-            continue
-
-        if indices != list(range(len(indices))):
-            continue
-
-        if len(indices) != n_conditions:
-            continue
-
-        # Verificar shapes: (p, r_c) con p constante y r_c variable
-        # (o al menos que p sea grande > 10)
-        shapes_ok = True
-        p_vals = []
-        for idx in indices:
-            key = f'{prefix}__{idx}'
-            # La shape se verificara al cargar, por ahora aceptamos
-            p_vals.append(idx)
-
-        candidates.append(prefix)
-
-    return candidates
-
-
-def _identify_eigenvalue_arrays(
-    d_info: dict,
-    n_conditions: int,
-) -> list[str]:
-    """Identificar keys anidadas que contienen eigenvalores Lambda por condicion.
-
-    Similar a _identify_mode_arrays pero buscando shapes (r_c,)  (1D).
-    """
-    nested = d_info['nested_dicts']
-    candidates = []
-
-    for prefix, subkeys in nested.items():
-        try:
-            indices = sorted(int(sk) for sk in subkeys)
-        except ValueError:
-            continue
-
-        if indices != list(range(len(indices))):
-            continue
-        if len(indices) != n_conditions:
-            continue
-
-        candidates.append(prefix)
-
-    return candidates
-
-
 def _json_safe(obj):
     """Convertir tipos numpy a tipos nativos de Python para JSON."""
-    if isinstance(obj, (np.integer, )):
+    if isinstance(obj, np.integer):
         return int(obj)
-    if isinstance(obj, (np.floating, )):
+    if isinstance(obj, np.floating):
         return float(obj)
     if isinstance(obj, np.ndarray):
         return obj.tolist()
@@ -176,17 +62,99 @@ def _json_safe(obj):
     return obj
 
 
+def _extract_per_condition(
+    W: np.ndarray,
+    lam: np.ndarray | None,
+    r_specific: np.ndarray,
+    C: int,
+) -> list[tuple[np.ndarray, np.ndarray | None]]:
+    """Extraer W(c) y lambda(c) por condicion desde los arrays planos.
+
+    El array W_specific guardado por _save_result_arrays puede tener
+    distintas formas dependiendo de como lo devuelva el pipeline:
+
+    - 3D (C, p, r_max): stacked, cada condicion ocupa W[c, :, :r_c]
+    - 2D (p, r_total): concatenado, se divide por sumas acumuladas de r_specific
+
+    Parameters
+    ----------
+    W : ndarray
+        Array de modos especificos (W_specific).
+    lam : ndarray or None
+        Array de eigenvalores (lambda_specific).
+    r_specific : ndarray, shape (C,)
+        Numero de modos por condicion.
+    C : int
+        Numero de condiciones.
+
+    Returns
+    -------
+    list of (W_c, lam_c) tuples
+        W_c has shape (p, r_c), lam_c has shape (r_c,) or None.
+    """
+    results = []
+
+    if W.ndim == 3 and W.shape[0] == C:
+        # --- Caso 3D: (C, p, r_max) ---
+        for c in range(C):
+            rc = int(r_specific[c])
+            W_c = W[c, :, :rc]
+            results.append((W_c, None))  # lam se procesa abajo
+
+        if lam is not None:
+            if lam.ndim == 2 and lam.shape[0] == C:
+                for c in range(C):
+                    rc = int(r_specific[c])
+                    results[c] = (results[c][0], lam[c, :rc])
+            elif lam.ndim == 1:
+                # Flat concatenado igual que W
+                offset = 0
+                for c in range(C):
+                    rc = int(r_specific[c])
+                    results[c] = (results[c][0], lam[offset:offset + rc])
+                    offset += rc
+
+    elif W.ndim == 2:
+        # --- Caso 2D: (p, r_total) concatenado ---
+        offset = 0
+        for c in range(C):
+            rc = int(r_specific[c])
+            W_c = W[:, offset:offset + rc]
+            results.append((W_c, None))
+            offset += rc
+
+        if lam is not None:
+            if lam.ndim == 1:
+                offset = 0
+                for c in range(C):
+                    rc = int(r_specific[c])
+                    results[c] = (results[c][0], lam[offset:offset + rc])
+                    offset += rc
+            elif lam.ndim == 2 and lam.shape[0] == C:
+                for c in range(C):
+                    rc = int(r_specific[c])
+                    results[c] = (results[c][0], lam[c, :rc])
+
+    else:
+        raise ValueError(
+            f'Shape de W_specific no reconocido: {W.shape}. '
+            f'Se esperaba 2D (p, r_total) o 3D (C, p, r_max).'
+        )
+
+    return results
+
+
 def build_mode_map(
     results_dir: str | Path,
     top_n: int = 2,
 ) -> dict:
-    """Construir el modo de mapeo de los resultados de CD-HSA.
+    """Construir el mapeo de modos especificos desde resultados de CD-HSA.
 
     Parameters
     ----------
     results_dir : path
         Directorio que contiene hankel_info.json, config.json,
-        hankel_matrices.npz y cdhsa_arrays.npz.
+        y cdhsa_arrays.npz.
     top_n : int
         Cuantos modos especificos conservar por condicion (ordenados
         por eigenvalor descendente).
@@ -194,7 +162,7 @@ def build_mode_map(
     Returns
     -------
     mode_map : dict
-        Estructura JSON completa (ver docstring del modulo).
+        Estructura JSON completa.
     """
     results_dir = Path(results_dir)
 
@@ -209,16 +177,13 @@ def build_mode_map(
 
     tasks = hankel_info.get('tasks', [])
     S = hankel_info.get('n_super_subjects',
-                        hankel_info.get('S', len(tasks) and 1))
+                        hankel_info.get('S', 1))
     C = len(tasks)
-    p = hankel_info.get('n_channels_common',
-                        hankel_info.get('n_global_channels', None))
+    p_ch = hankel_info.get('n_channels_common',
+                          hankel_info.get('n_global_channels', None))
     depth = hankel_info.get('depth_common',
                             hankel_info.get('hankel_depth_requested', None))
-    if p is not None and depth is not None:
-        p_hankel = p * depth
-    else:
-        p_hankel = None
+    p_hankel = (p_ch * depth) if (p_ch is not None and depth is not None) else None
 
     # ------------------------------------------------------------------
     # 2. Cargar cdhsa_arrays.npz
@@ -227,191 +192,155 @@ def build_mode_map(
     npz_data = np.load(npz_path, allow_pickle=True)
 
     # ------------------------------------------------------------------
-    # 3. Extraer informacion de Step D
+    # 3. Extraer arrays de Step D (keys flat D__*)
     # ------------------------------------------------------------------
-    d_info = _find_d_keys(npz_data)
+    d_keys = [k for k in npz_data.files if k.startswith('D__')]
 
-    # Numero de condiciones desde el NPZ (D__C)
-    n_conditions_npz = None
-    for k, _ in d_info['scalar_keys']:
-        if k == 'D__C':
-            n_conditions_npz = int(npz_data[k].flat[0])
-            break
-    if n_conditions_npz is None:
-        for k, shape in d_info['array_keys']:
-            if 'r_specific' in k:
-                n_conditions_npz = len(npz_data[k])
-                break
-
-    if n_conditions_npz is None:
+    # --- r_specific: (C,) numero de modos por condicion ---
+    if 'D__r_specific' not in npz_data:
         raise ValueError(
-            'No se pudo determinar el numero de condiciones desde '
-            'cdhsa_arrays.npz. Verifique que Step D se ejecuto correctamente.'
+            'No se encontro D__r_specific en cdhsa_arrays.npz. '
+            'Step D puede no haberse ejecutado.\n'
+            f'Keys D__ disponibles: {d_keys}'
+        )
+    r_specific = npz_data['D__r_specific']
+    C_npz = len(r_specific)
+    if C_npz != C:
+        raise ValueError(
+            f'Inconsistencia: hankel_info dice C={C} pero '
+            f'D__r_specific tiene {C_npz} elementos'
         )
 
-    assert n_conditions_npz == C, (
-        f'Inconsistencia: hankel_info dice C={C} pero '
-        f'cdhsa_arrays.npz dice C={n_conditions_npz}'
-    )
+    # --- prevalence_contrast: (C,) ---
+    prev_contrast = (npz_data['D__prevalence_contrast']
+                     if 'D__prevalence_contrast' in npz_data else None)
 
-    # r_specific: cuantos modos se encontraron por condicion
-    r_specific = None
-    for k, shape in d_info['array_keys']:
-        if 'r_specific' in k:
-            r_specific = npz_data[k]
-            break
+    # --- prevalence_own: (C,) ---
+    prev_own = (npz_data['D__prevalence_own']
+                if 'D__prevalence_own' in npz_data else None)
 
-    # prevalence_contrast
-    prev_contrast = None
-    for k, shape in d_info['array_keys']:
-        if 'prevalence_contrast' in k:
-            prev_contrast = npz_data[k]
-            break
-
-    # ------------------------------------------------------------------
-    # 4. Identificar arrays de modos (Phi) y eigenvalores (Lambda)
-    # ------------------------------------------------------------------
-    mode_candidates = _identify_mode_arrays(d_info, C)
-    eigen_candidates = _identify_eigenvalue_arrays(d_info, C)
-
-    # Separar: los que tienen shape 2D (p, r_c) son Phi,
-    # los que tienen shape 1D (r_c,) son Lambda
-    phi_key = None
-    lambda_key = None
-
-    for prefix in mode_candidates:
-        sample_key = f'{prefix}__0'
-        shape = npz_data[sample_key].shape
-        if len(shape) == 2 and shape[0] > shape[1]:
-            phi_key = prefix
-            break
-        elif len(shape) == 1:
-            if lambda_key is None:
-                lambda_key = prefix
-
-    for prefix in eigen_candidates:
-        if prefix == phi_key:
-            continue
-        sample_key = f'{prefix}__0'
-        shape = npz_data[sample_key].shape
-        if len(shape) == 1:
-            lambda_key = prefix
-            break
-
-    if phi_key is None:
-        # Fallback: buscar cualquier key anidada con sub-keys numericos
-        # y shape 2D
-        for prefix, subkeys in d_info['nested_dicts'].items():
-            try:
-                indices = [int(sk) for sk in subkeys]
-            except ValueError:
-                continue
-            sample_key = f'{prefix}__{indices[0]}'
-            shape = npz_data[sample_key].shape
-            if len(shape) == 2:
-                phi_key = prefix
-                break
-
-    if phi_key is None:
+    # --- W_specific: modos especificos (3D o 2D) ---
+    if 'D__W_specific' not in npz_data:
         raise ValueError(
-            'No se encontraron arrays de modos especificos (Phi) en '
-            'cdhsa_arrays.npz. Posibles causas: Step D no se ejecuto, '
-            'o la estructura de keys no coincide con lo esperado.\n'
-            f'Keys D__ encontradas: {[k for k in npz_data.files if k.startswith("D__")]}'
+            'No se encontro D__W_specific en cdhsa_arrays.npz. '
+            'Step D puede no haberse ejecutado.\n'
+            f'Keys D__ disponibles: {d_keys}'
         )
+    W_all = npz_data['D__W_specific']
+
+    # --- lambda_specific: eigenvalores (opcional) ---
+    lam_all = (npz_data['D__lambda_specific']
+               if 'D__lambda_specific' in npz_data else None)
+
+    # --- residual_rank: (C,) o escalar ---
+    residual_rank = (npz_data['D__residual_rank']
+                     if 'D__residual_rank' in npz_data else None)
 
     # ------------------------------------------------------------------
-    # 5. Para cada condicion: obtener modos, eigenvalores, y ordenar
+    # 4. Extraer W(c) y lambda(c) por condicion
+    # ------------------------------------------------------------------
+    per_condition = _extract_per_condition(W_all, lam_all, r_specific, C)
+
+    # ------------------------------------------------------------------
+    # 5. Para cada condicion: ordenar por eigenvalor, seleccionar top-N
     # ------------------------------------------------------------------
     conditions_data = {}
 
     for c_idx in range(C):
         task_name = tasks[c_idx]
+        W_c, lam_c = per_condition[c_idx]
+        r_c = W_c.shape[1]
 
-        # Cargar Phi(c) y Lambda(c) si existen
-        phi_npz_key = f'{phi_key}__{c_idx}'
-        Phi_c = npz_data[phi_npz_key]
-        r_c = Phi_c.shape[1] if len(Phi_c.shape) == 2 else Phi_c.shape[0]
-
-        # Eigenvalores
-        eigenvals = None
-        if lambda_key is not None:
-            lam_npz_key = f'{lambda_key}__{c_idx}'
-            if lam_npz_key in npz_data:
-                eigenvals = npz_data[lam_npz_key]
-
-        # Si hay eigenvalores, ordenar por ellos (descendente)
-        if eigenvals is not None and len(eigenvals) == r_c:
-            order = np.argsort(eigenvals)[::-1]  # descendente
+        # Ordenar por eigenvalor descendente
+        if lam_c is not None and len(lam_c) == r_c:
+            order = np.argsort(lam_c)[::-1]
         else:
-            # Sin eigenvalores, asumir que ya vienen ordenados
             order = np.arange(r_c)
 
-        # Top-N modos
         n_actual = min(top_n, r_c)
         top_indices = [int(order[i]) for i in range(n_actual)]
 
-        # Construir info
         cond_info = {
             'task': task_name,
             'condition_index': c_idx,
             'total_specific_modes': int(r_c),
             'top_n_requested': top_n,
             'top_n_actual': n_actual,
-            'mode_indices_in_Phi': top_indices,
-            'mode_npz_keys': [f'{phi_key}__{c_idx}'],
-            'Phi_shape': list(Phi_c.shape),
-            'eigenvalues_npz_key': (f'{lambda_key}__{c_idx}'
-                                    if lambda_key is not None else None),
-            'eigenvalues': _json_safe(eigenvals) if eigenvals is not None else None,
+            'mode_indices_in_W': top_indices,
+            'W_npz_key': 'D__W_specific',
+            'W_shape_full': list(W_all.shape),
+            'W_c_shape': list(W_c.shape),
+            'eigenvalues_npz_key': ('D__lambda_specific'
+                                   if lam_all is not None else None),
+            'eigenvalues': _json_safe(lam_c) if lam_c is not None else None,
+            'eigenvalues_sorted': (_json_safe(lam_c[order])
+                                   if lam_c is not None else None),
             'prevalence_contrast': (float(prev_contrast[c_idx])
                                     if prev_contrast is not None else None),
-            'r_specific_from_pipeline': (int(r_specific[c_idx])
-                                          if r_specific is not None else None),
+            'prevalence_own': (float(prev_own[c_idx])
+                               if prev_own is not None else None),
+            'r_specific_from_pipeline': int(r_specific[c_idx]),
+            'residual_rank': (int(residual_rank[c_idx])
+                              if residual_rank is not None
+                              and np.ndim(residual_rank) > 0
+                              else int(residual_rank)
+                              if residual_rank is not None else None),
         }
 
-        # Para cada modo en top_indices, guardar la info
+        # Info detallada de cada modo seleccionado
         cond_info['modes'] = []
         for rank_pos, mode_idx in enumerate(top_indices):
             mode_info = {
-                'rank_position': rank_pos + 1,  # 1 = mas importante
-                'column_index_in_Phi': mode_idx,
-                'eigenvalue': (float(eigenvals[mode_idx])
-                               if eigenvals is not None else None),
+                'rank_position': rank_pos + 1,
+                'column_index_in_W_c': mode_idx,
+                'eigenvalue': (float(lam_c[mode_idx])
+                               if lam_c is not None else None),
+                'eigenvalue_rank': rank_pos + 1,
             }
             cond_info['modes'].append(mode_info)
 
         conditions_data[task_name] = cond_info
 
     # ------------------------------------------------------------------
-    # 6. Para cada (super-sujeto, condicion): mapeo a Hankel y proyeccion
+    # 6. Para cada (super-sujeto, condicion): mapeo a Hankel + proyeccion
     # ------------------------------------------------------------------
     per_pair = []
 
     for s_idx in range(S):
-        ss_label = f'SS{s_idx + 1}'
         for c_idx in range(C):
             task_name = tasks[c_idx]
             hankel_key = f'H_ss{s_idx + 1}_c{c_idx + 1}'
 
             cond = conditions_data[task_name]
-            mode_indices = cond['mode_indices_in_Phi']
-            phi_key_for_cond = cond['mode_npz_keys'][0]
+            mode_indices = cond['mode_indices_in_W']
+
+            # Construir la formula de proyeccion concreta
+            # Depende de si W es 3D o 2D
+            if W_all.ndim == 3:
+                w_slice = f'W_specific[{c_idx}, :, :{cond["total_specific_modes"]}][:, {mode_indices}]'
+            else:
+                rc = cond['total_specific_modes']
+                # Calcular offset para esta condicion
+                offset = int(np.sum(r_specific[:c_idx]))
+                w_slice = f'W_specific[:, {offset}:{offset + rc}][:, {mode_indices}]'
 
             entry = {
                 'super_subject': s_idx + 1,
-                'super_subject_label': ss_label,
+                'super_subject_label': f'SS{s_idx + 1}',
                 'task': task_name,
                 'task_index': c_idx,
+                'condition_index_in_W': c_idx if W_all.ndim == 3 else None,
                 'hankel_npz_key': hankel_key,
                 'hankel_npz_file': 'hankel_matrices.npz',
-                'specific_modes_npz_key': phi_key_for_cond,
-                'specific_modes_npz_file': 'cdhsa_arrays.npz',
+                'W_npz_key': 'D__W_specific',
+                'W_npz_file': 'cdhsa_arrays.npz',
                 'columns_to_extract': mode_indices,
                 'n_output_dimensions': cond['top_n_actual'],
-                'projection_formula': (
-                    f'alpha = {phi_key_for_cond}[:, {mode_indices}].T @ {hankel_key}\n'
-                    f'  -> alpha shape: ({cond["top_n_actual"]}, T)'
+                'projection_code': (
+                    f'W = cdhsa["D__W_specific"]  # {list(W_all.shape)}\n'
+                    f'H = hankel["{hankel_key}"]      # (p, T)\n'
+                    f'W_sel = {w_slice}             # (p, {n_actual})\n'
+                    f'alpha = W_sel.T @ H            # ({n_actual}, T)'
                 ),
             }
             per_pair.append(entry)
@@ -420,11 +349,10 @@ def build_mode_map(
     # 7. Info del espacio comun (A6)
     # ------------------------------------------------------------------
     common_info = {}
-    a6_keys = [k for k in npz_data.files if k.startswith('A6__')]
-    for k in a6_keys:
-        short_name = k.replace('A6__', '')
-        arr = npz_data[k]
-        common_info[short_name] = _json_safe(arr)
+    for k in npz_data.files:
+        if k.startswith('A6__'):
+            short_name = k.replace('A6__', '')
+            common_info[short_name] = _json_safe(npz_data[k])
 
     # ------------------------------------------------------------------
     # 8. Ensamblar JSON final
@@ -436,7 +364,7 @@ def build_mode_map(
             'n_conditions': C,
             'tasks': tasks,
             'p_hankel': p_hankel,
-            'n_channels': p,
+            'n_channels': p_ch,
             'hankel_depth': depth,
             'top_n_requested': top_n,
             'pipeline_config': {
@@ -451,14 +379,13 @@ def build_mode_map(
         'conditions': conditions_data,
         'per_super_subject_task': per_pair,
         'npz_structure': {
-            'd_keys_found': [k for k in npz_data.files if k.startswith('D__')],
-            'd_scalar_keys': [k for k, _ in d_info['scalar_keys']],
-            'd_array_keys': [(k, list(sh)) for k, sh in d_info['array_keys']],
-            'd_nested_prefixes': d_info['nested_dicts'],
-            'phi_key_identified': phi_key,
-            'lambda_key_identified': lambda_key,
+            'W_specific_shape': list(W_all.shape),
+            'lambda_specific_shape': (list(lam_all.shape)
+                                      if lam_all is not None else None),
+            'r_specific': _json_safe(r_specific),
+            'all_D_keys': d_keys,
         },
-        'usage_instructions': {
+        'usage': {
             'description': (
                 'Para obtener las series temporales de dimension top_n '
                 'del par (super_subject, task), proyectar la Hankel '
@@ -468,12 +395,12 @@ def build_mode_map(
                 'import numpy as np\n'
                 'hankel = np.load("hankel_matrices.npz")\n'
                 'cdhsa = np.load("cdhsa_arrays.npz")\n'
-                'H = hankel["H_ss1_c1"]  # (p, T)\n'
-                'Phi = cdhsa["D__Phi_specific__0"]  # (p, r_c)\n'
-                'idx = [0, 1]  # columns_to_extract\n'
-                'alpha = Phi[:, idx].T @ H  # (2, T)\n'
+                'W = cdhsa["D__W_specific"]  # ver shape en npz_structure\n'
+                'H = hankel["H_ss1_c1"]       # (p, T)\n'
+                'idx = [0, 1]  # columns_to_extract del JSON\n'
+                'alpha = W[:, idx].T @ H        # (2, T)\n'
                 '# alpha[0] = serie temporal del modo mas importante\n'
-                '# alpha[1] = serie temporal del segundo modo\n'
+                '# alpha[1] = serie temporal del segundo modo'
             ),
         },
     }
@@ -536,7 +463,8 @@ def main(argv: list[str] | None = None) -> int:
     mode_map = build_mode_map(results_dir, top_n=args.top_n)
 
     # Guardar
-    out_path = Path(args.output) if args.output else results_dir / 'mode_map.json'
+    out_path = (Path(args.output) if args.output
+                else results_dir / 'mode_map.json')
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(mode_map, f, indent=2, ensure_ascii=False, default=str)
 
@@ -554,36 +482,28 @@ def main(argv: list[str] | None = None) -> int:
     for task_name, cond in mode_map['conditions'].items():
         r_c = cond['total_specific_modes']
         n_actual = cond['top_n_actual']
-        indices = cond['mode_indices_in_Phi']
+        indices = cond['mode_indices_in_W']
         pc = cond['prevalence_contrast']
-        print(f'    {task_name}: {r_c} modos encontrados, '
-              f'top-{n_actual} = columnas {indices}, '
-              f'prev_contrast = {pc}')
+        print(f'    {task_name}: {r_c} modos, '
+              f'top-{n_actual} = cols {indices}, '
+              f'prev_contrast={pc}')
         for m in cond['modes']:
             ev = m['eigenvalue']
             ev_str = f'ev={ev:.6f}' if ev is not None else 'ev=N/A'
-            print(f'      rank {m["rank_position"]}: columna {m["column_index_in_Phi"]} ({ev_str})')
+            print(f'      rank {m["rank_position"]}: col {m["column_index_in_W_c"]} ({ev_str})')
 
     print()
-    print('  Mapeo (super-sujeto, task) -> Hankel key:')
+    print('  Mapeo (SS, task) -> Hankel key -> cols:')
     for entry in mode_map['per_super_subject_task']:
         print(f'    SS{entry["super_subject"]}/{entry["task"]}: '
-              f'{entry["hankel_npz_key"]} -> cols {entry["columns_to_extract"]}')
+              f'{entry["hankel_npz_key"]} -> {entry["columns_to_extract"]}')
 
-    # Mostrar estructura NPZ detectada
-    npz_struct = mode_map['npz_structure']
     print()
-    print('  Estructura NPZ detectada:')
-    print(f'    Phi (modos) key:  {npz_struct["phi_key_identified"]}')
-    print(f'    Lambda (eigenvals) key: {npz_struct["lambda_key_identified"]}')
-    print(f'    D__ keys totales: {len(npz_struct["d_keys_found"])}')
-    if npz_struct['d_nested_prefixes']:
-        print('    Prefijos anidados:')
-        for prefix, subkeys in npz_struct['d_nested_prefixes'].items():
-            sample = f'{prefix}__{subkeys[0]}'
-            shape = 'N/A'
-            print(f'      {prefix}: {len(subkeys)} sub-keys '
-                  f'(ej: {sample})')
+    npz_struct = mode_map['npz_structure']
+    print(f'  W_specific shape: {npz_struct["W_specific_shape"]}')
+    if npz_struct['lambda_specific_shape']:
+        print(f'  lambda_specific shape: {npz_struct["lambda_specific_shape"]}')
+    print(f'  r_specific: {npz_struct["r_specific"]}')
 
     return 0
 
