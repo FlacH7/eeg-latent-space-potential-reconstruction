@@ -237,7 +237,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-dynamics", type=str, default=None,
-        choices=["pca_ica", "pca", "dmd", "diffusion_maps"],
+        choices=["pca_ica", "pca", "dmd", "diffusion_maps", "cdhsa_specific_modes"],
         help="Stage 2 dynamics (new API).",
     )
     parser.add_argument(
@@ -706,6 +706,19 @@ def main() -> int:
         except Exception as e:
             print(f"  [WARN] Kernel diagnostics omitido: {e}")
         plot_diffusion_2d_components(meta, out_dir=out_dir)
+        # CD-HSA Specific Modes
+        if stage2_meta.get("dynamics") == "cdhsa_specific_modes":
+            try:
+                from src.plotters.cdhsa_plots import (
+                    plot_cdhsa_eigenvalue_spectrum,
+                    plot_cdhsa_mode_structure,
+                    plot_cdhsa_projection_power,
+                )
+                plot_cdhsa_eigenvalue_spectrum(stage2_meta, out_dir=out_dir)
+                plot_cdhsa_mode_structure(stage2_meta, out_dir=out_dir)
+                plot_cdhsa_projection_power(stage2_meta, Y2=meta["Y"], out_dir=out_dir)
+            except Exception as e:
+                print(f"  [WARN] CD-HSA plots omitidos: {e}")
         print("  [OK] Plots Stage 2 guardados.")
     except Exception as e:
         print(f"  [WARN] Error en plots Stage 2: {e}")

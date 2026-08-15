@@ -6,7 +6,7 @@ Refactored orchestrator: the monolithic pipeline is now a composition of
 three decoupled stages with a uniform interface::
 
     Stage 1 — Embedding   : None | "hankel"
-    Stage 2 — Dynamics    : "pca_ica" | "pca" | "dmd" | "diffusion_maps"
+    Stage 2 — Dynamics    : "pca_ica" | "pca" | "dmd" | "diffusion_maps" | "cdhsa_specific_modes"
     Stage 3 — Selection   : "top_n" | "markov_fastest" | "markov_slowest"
 
 Arbitrary combinations are allowed and comparable under a single API,
@@ -239,7 +239,7 @@ def extract_latent_space(
     stage1_embedding: Literal[None, "hankel"] = None,
     stage1_params: dict | None = None,
     # ---- Stage 2: Dynamics ----
-    stage2_dynamics: Literal["pca_ica", "pca", "dmd", "diffusion_maps"] = "pca_ica",
+    stage2_dynamics: Literal["pca_ica", "pca", "dmd", "diffusion_maps", "cdhsa_specific_modes"] = "pca_ica",
     stage2_params: dict | None = None,
     # ---- Stage 3: Selection ----
     stage3_selection: Literal["top_n", "markov_fastest", "markov_slowest"] = "top_n",
@@ -462,6 +462,8 @@ def extract_latent_space(
         Y2 = np.real(Y2)
 
     n_time_lost = int(meta1.get("n_time_lost", 0) or 0)
+    # Add extra time lost by Stage 2 (e.g. block-Hankel in cdhsa_specific_modes)
+    n_time_lost += int(meta2.get("n_time_lost_by_block_hankel", 0) or 0)
     print(f"[Stage 2] dynamics={stage2_dynamics!r} (branch={meta2.get('branch', '-')}) | "
           f"in={meta2.get('input_shape', '-')} → out={tuple(Y2.shape)}"
           f" | {time.time() - t2:.2f}s")
