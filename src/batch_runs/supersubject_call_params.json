@@ -2,8 +2,8 @@
   "pipeline_module": "src.pipelines.test_iga_from_eeg_latent_test_retest_gedai_super_subject",
 
   "super_subjects": {
-    "selected": [1, 2, 3],
-    "subjects_per_super_subject": 20,
+    "selected": [1, 2, 3, 4, 5],
+    "subjects_per_super_subject": 12,
     "subject_start_offset": 1,
     "total_subjects": 60,
     "_comment_groups": "Opcional: si se define 'groups', toma precedencia sobre la auto-resolucion. Las claves pueden ser enteros o strings; los valores son listas de indices de sujetos. Ejemplo: \"groups\": {\"1\": [1,2,...,20], \"2\": [21,...,40], \"3\": [41,...,60]}"
@@ -14,19 +14,19 @@
   "tasks": ["eyesclosed","music"],
 
   "time_window": {
-    "t_start": 0.0,
-    "t_end": 300.0,
+    "t_start": 100.0,
+    "t_end": 200.0,
     "_comment": "Ventana temporal aplicada POR SUJETO antes de concatenar. Cada super-sujeto queda con N_subjects * (t_end - t_start) segundos."
   },
 
   "methods": [
     {
-      "label": "hankel+pca+top_2",
+      "label": "hankel+cdhsa+top_2",
       "stage1_embedding": "hankel",
       "stage1_params": {"depth": 10},
-      "stage2_dynamics": "pca",
+      "stage2_dynamics": "cdhsa_specific_modes",
       "stage2_params": {
-        "n_components": 20
+        "mode_map_path": "params/mode_map_session1_eyesclosed_music_100.0s-200.0s.json"
       },
       "stage3_selection": "top_n",
       "stage3_params": {}
@@ -34,7 +34,7 @@
   ],
 
   "shared_params": {
-    "latent_dim": 4,
+    "latent_dim": 2,
     "l_freq": 1.0,
     "h_freq": 40.0,
     "ica_method": "picard",
