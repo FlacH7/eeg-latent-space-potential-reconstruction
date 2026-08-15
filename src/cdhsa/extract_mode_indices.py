@@ -47,6 +47,22 @@ from pathlib import Path
 import numpy as np
 
 
+def _safe_scalar(x) -> int | float | None:
+    """Convertir un valor numpy (de cualquier dimensionalidad) a escalar Python.
+
+    Maneja: None, 0-d arrays, 1D arrays de un elemento, y arrays
+    multidimensionales (devuelve la lista conversion via tolist).
+    """
+    if x is None:
+        return None
+    arr = np.asarray(x)
+    if arr.ndim == 0:
+        return arr.item()
+    if arr.size == 1:
+        return arr.flat[0].item()
+    return arr.tolist()
+
+
 def _json_safe(obj):
     """Convertir tipos numpy a tipos nativos de Python para JSON."""
     if isinstance(obj, np.integer):
@@ -280,11 +296,7 @@ def build_mode_map(
             'prevalence_own': (float(prev_own[c_idx])
                                if prev_own is not None else None),
             'r_specific_from_pipeline': int(r_specific[c_idx]),
-            'residual_rank': (int(residual_rank[c_idx])
-                              if residual_rank is not None
-                              and np.ndim(residual_rank) > 0
-                              else int(residual_rank)
-                              if residual_rank is not None else None),
+            'residual_rank': _safe_scalar(residual_rank),
         }
 
         # Info detallada de cada modo seleccionado
