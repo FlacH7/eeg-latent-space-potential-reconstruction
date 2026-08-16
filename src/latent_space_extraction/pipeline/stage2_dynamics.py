@@ -1006,6 +1006,59 @@ class CDHSASpecificModesDynamics:
         mode_norms = np.linalg.norm(W_sel, axis=0).tolist()
 
         # ------------------------------------------------------------------
+        # 9b. Load common-subspace info from A6 (step A6 of CD-HSA)
+        # ------------------------------------------------------------------
+        # The common modes are the r0 first SVD directions validated by
+        # the null-distribution test in Step A6.  They are *not* the
+        # "remaining" specific modes — they come from a different
+        # decomposition stage entirely.
+        #
+        # Data sources (tried in order):
+        #   1. mode_map["common_subspace"] — JSON-safe dump of A6__* keys
+        #   2. NPZ directly — A6__r0, A6__lambda0, A6__U0 (if stored)
+        r0 = None
+        common_eigenvalues = None  # lambda0: eigenvalues of the r0 common directions
+        W_common = None            # U0: (p, r0) common basis vectors (if available)
+
+        common_subspace = mode_map.get("common_subspace", {})
+        if common_subspace:
+            r0_raw = common_subspace.get("r0")
+            if r0_raw is not None:
+                r0 = int(r0_raw)
+            lambda0_raw = common_subspace.get("lambda0")
+            if lambda0_raw is not None:
+                if isinstance(lambda0_raw, list):
+                    common_eigenvalues = [float(v) for v in lambda0_raw]
+                else:
+                    common_eigenvalues = [float(lambda0_raw)]
+            # U0 may or may not be in the JSON (large array);
+            # fall back to NPZ if needed for spatial structure plots.
+            if "U0" in common_subspace:
+                U0_raw = common_subspace["U0"]
+                if isinstance(U0_raw, list):
+                    W_common = np.array(U0_raw, dtype=np.float64)
+
+        # If r0 not found in mode_map JSON, try NPZ directly
+        if r0 is None and "A6__r0" in npz_data:
+            r0 = int(npz_data["A6__r0"])
+        if common_eigenvalues is None and "A6__lambda0" in npz_data:
+            lam0 = npz_data["A6__lambda0"]
+            common_eigenvalues = lam0.flatten().tolist()
+        if W_common is None and "A6__U0" in npz_data:
+            W_common = npz_data["A6__U0"].astype(np.float64)
+
+        n_common = r0 if r0 is not None else 0
+
+        # Compute common mode norms if W_common is available
+        common_mode_norms = None
+        if W_common is not None and n_common > 0:
+            common_mode_norms = np.linalg.norm(W_common, axis=0).tolist()
+
+        print(f"  [Stage2/cdhsa_specific_modes] Mode breakdown: "
+              f"r0={r0} common (A6) + {top_n} specific (D, of {rc} total) = "
+              f"{n_common + rc} modes")
+
+        # ------------------------------------------------------------------
         # 10. Metadata
         # ------------------------------------------------------------------
         n_time_lost_block = L - 1
@@ -1023,6 +1076,11 @@ class CDHSASpecificModesDynamics:
                 lam_c.tolist() if lam_c is not None else None
             ),
             "mode_norms": mode_norms,
+            "r0_common": r0,
+            "common_eigenvalues": common_eigenvalues,
+            "common_mode_norms": common_mode_norms,
+            "n_common_modes": n_common,
+            "W_common": W_common,
             "mode_map_path": str(mode_map_path),
             "npz_path": str(npz_file),
             "W_sel_shape": list(W_sel.shape),
