@@ -925,7 +925,7 @@ class CDHSABatchRunner:
             tasks_tag = "_".join(job["tasks"])
             tw_tag = f"{job['t_start']}s-{job['t_end']}s"
             json_name = (
-                f"mode_map_{job['session']}_{tasks_tag}_{tw_tag}.json"
+                f"mode_map_{top_n}_modes_{job['session']}_{tasks_tag}_{tw_tag}.json"
             )
             json_out = self.params_dir / json_name
 
