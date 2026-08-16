@@ -21,12 +21,12 @@
 
   "methods": [
     {
-      "label": "hankel+cdhsa+top_2",
+      "label": "hankel+cdhsa+top_4",
       "stage1_embedding": "hankel",
       "stage1_params": {"depth": 10},
       "stage2_dynamics": "cdhsa_specific_modes",
       "stage2_params": {
-        "mode_map_path": "params/mode_map_session1_eyesclosed_music_100.0s-200.0s.json"
+        "mode_map_path": "params/mode_map_4_modes_session1_eyesclosed_music_100.0s-200.0s.json"
       },
       "stage3_selection": "top_n",
       "stage3_params": {}
@@ -53,7 +53,7 @@
     "n_bins": 10,
     "workers": null,
     "search_strategy": "exhaustive",
-    "km_bins": 40
+    "km_bins": 10
   },
 
   "execution": {
