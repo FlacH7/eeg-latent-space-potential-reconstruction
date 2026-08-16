@@ -31,13 +31,13 @@
     "skip_bc": false,
     "skip_tangent": false,
     "skip_d": false,
-    "d_max_specific": 2
+    "d_max_specific": 4
   },
 
   "execution": {
     "max_workers": 1,
     "delay": 0.0,
     "run_comparison": false,
-    "mode_extract_top_n": 2
+    "mode_extract_top_n": 4
   }
 }
