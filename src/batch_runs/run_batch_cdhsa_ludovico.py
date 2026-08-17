@@ -447,7 +447,7 @@ def run_batch(
     After the pipeline completes successfully, extracts mode indices
     and saves mode_map.json to params_dir (mirrors standard pipeline).
     """
-    from run_cdhsa_ludovico import LudovicoCDHSAConfig, run_ludovico_pipeline
+    from src.pipelines.run_cdhsa_ludovico import LudovicoCDHSAConfig, run_ludovico_pipeline
 
     cdhsa = params["cdhsa_params"]
     pre = params.get("preprocessing", {})
