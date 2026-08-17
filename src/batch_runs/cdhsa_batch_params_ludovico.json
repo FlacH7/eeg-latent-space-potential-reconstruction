@@ -36,7 +36,6 @@
 
   "execution": {
     "run_comparison": false,
-    "mode_extract_top_n": 4,
     "_comment_comparison": "No hay multi-SS para comparar, se desactiva."
   }
 }

@@ -218,56 +218,51 @@ def _resolve_params_dir(params: dict, cli_params_dir: str | None) -> Path:
 def _extract_mode_indices(
     results_dir: Path,
     top_n: int = 4,
+    cdhsa_params: dict | None = None,
 ) -> dict[str, Any]:
     """Extract the top-N condition-specific mode indices from CDHSA results.
 
     This function replicates what ``src.cdhsa.extract_mode_indices`` does
     in the standard pipeline.  It reads the ``cdhsa_arrays.npz`` and
     ``condition_specific_modes.npz`` produced by ``run_cdhsa_ludovico.py``
-    and produces a JSON-serializable mode map.
+    and produces a JSON-serializable mode map whose structure is
+    **exactly** what ``CDHSASpecificModesDynamics`` (Stage 2) expects.
 
-    The output structure matches the standard pipeline's mode_map.json::
+    Expected by Stage2 (fields actually read)::
 
-        {
-          "results_dir": "/path/to/output",
-          "experiment_label": "...",
-          "top_n": 4,
-          "n_conditions": 10,
-          "conditions": ["data_01_23_18", ...],
-          "mode_map": {
-            "data_01_23_18": {
-              "mode_indices": [0, 1, 2, 3],
-              "lambda_specific": [0.82, 0.51, 0.33, 0.12],
-              "r_specific": 4,
-              "alignment_specific": 0.95,
-              "prevalence_contrast": 0.95
-            },
-            ...
-          },
-          "generated_at": "2026-08-17T12:34:56"
-        }
+        mode_map["conditions"]           # DICT {name: {info}}
+        mode_map["conditions"][name]["mode_indices_in_W"]
+        mode_map["conditions"][name]["top_n_actual"]
+        mode_map["metadata"]["pipeline_config"]["L"]
+        mode_map["metadata"]["source_dir"]
+        mode_map["metadata"]["p_hankel"]
+        mode_map["common_subspace"]
 
     Parameters
     ----------
     results_dir : Path
-        Directory containing ``cdhsa_arrays.npz`` and
-        ``condition_specific_modes.npz`` (and ``load_info.json``
-        for condition names).
+        Directory containing ``cdhsa_arrays.npz``,
+        ``condition_specific_modes.npz``, ``load_info.json``,
+        ``config.json``, and ``hankel_info.json``.
     top_n : int
         Number of top modes to report per condition.
+    cdhsa_params : dict | None
+        CDHSA parameters used (for embedding in metadata).
 
     Returns
     -------
     mode_map : dict
-        JSON-serializable dictionary with mode indices and metadata.
+        JSON-serializable dictionary compatible with
+        ``CDHSASpecificModesDynamics``.
     """
+    cdhsa_params = cdhsa_params or {}
+
     # --- Load condition names from load_info.json ---
     condition_names: list[str] = []
     load_info_path = results_dir / "load_info.json"
     if load_info_path.exists():
         with open(load_info_path, "r") as f:
             load_info = json.load(f)
-        # load_info has a "subjects" key with the folder names
         condition_names = list(load_info.get("subjects", []))
 
     # --- Load D arrays from condition_specific_modes.npz ---
@@ -278,59 +273,107 @@ def _extract_mode_indices(
         )
 
     csm = np.load(csm_path, allow_pickle=False)
-
-    # Extract r_specific to know how many modes per condition
     r_specific = csm["r_specific"]  # shape (C,)
     n_conditions = len(r_specific)
 
-    # If condition_names not loaded, generate generic ones
     if len(condition_names) == 0:
         condition_names = [f"condition_{c}" for c in range(n_conditions)]
 
-    # Prevalence contrast and alignment
     prevalence_contrast = csm["prevalence_contrast"]  # shape (C,)
-    alignment_specific = csm["alignment_specific"]  # shape (S, C) = (1, C)
-    # For S=1, take the single row
+    alignment_specific = csm["alignment_specific"]  # shape (1, C) for S=1
     if alignment_specific.ndim == 2:
-        alignment_per_cond = alignment_specific[0, :]  # shape (C,)
+        alignment_per_cond = alignment_specific[0, :]
     else:
         alignment_per_cond = alignment_specific
 
-    # Build mode_map per condition
-    mode_map: dict[str, dict] = {}
+    # --- Resolve p_hankel from hankel_info.json ---
+    p_hankel: int | None = None
+    hankel_info_path = results_dir / "hankel_info.json"
+    if hankel_info_path.exists():
+        with open(hankel_info_path, "r") as f:
+            hankel_info = json.load(f)
+        # p_hankel = n_channels * hankel_depth (rows of the Stage-1 Hankel)
+        p_hankel = hankel_info.get("p_hankel")
+        if p_hankel is None:
+            n_ch = hankel_info.get("n_channels", 0)
+            depth = hankel_info.get("hankel_depth", 0)
+            if n_ch and depth:
+                p_hankel = n_ch * depth
+
+    # --- Build conditions dict (MUST be a dict, NOT a list) ---
+    conditions_dict: dict[str, dict] = {}
     for c in range(n_conditions):
         name = condition_names[c] if c < len(condition_names) else f"condition_{c}"
         r_c = int(r_specific[c])
         actual_top = min(top_n, r_c)
 
-        # Mode indices: top-N by singular value (they are already sorted)
-        mode_indices = list(range(actual_top))
+        # Mode indices: top-N by singular value (already sorted by SVD)
+        mode_indices_in_W = list(range(actual_top))
 
         # Corresponding singular values
         lambda_key = f"lambda_specific_{name}"
+        lambda_top: list[float | None] = [None] * actual_top
         if lambda_key in csm:
             lambdas = csm[lambda_key]
-            # Take top_n largest (already sorted descending by SVD)
             lambda_top = [round(float(lambdas[j]), 8) for j in range(actual_top)]
-        else:
-            lambda_top = [None] * actual_top
 
-        mode_map[name] = {
-            "mode_indices": mode_indices,
+        conditions_dict[name] = {
+            "mode_indices_in_W": mode_indices_in_W,
+            "top_n_actual": actual_top,
             "lambda_specific": lambda_top,
             "r_specific": int(r_c),
             "alignment_specific": round(float(alignment_per_cond[c]), 8),
             "prevalence_contrast": round(float(prevalence_contrast[c]), 8),
         }
 
-    return {
-        "results_dir": str(results_dir),
-        "top_n": top_n,
-        "n_conditions": n_conditions,
-        "conditions": condition_names,
-        "mode_map": mode_map,
+    # --- Resolve L from cdhsa_params or config.json ---
+    L = cdhsa_params.get("L")
+    if L is None:
+        config_path = results_dir / "config.json"
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                cfg = json.load(f)
+            L = cfg.get("L")
+    if L is not None:
+        L = int(L)
+
+    # --- A6 info (bypassed for ludovico, but key must exist) ---
+    common_subspace: dict = {
+        "r0": None,
+        "lambda0": None,
+        "bypass_reason": "S=1 (ludovico_01): A6 requires S>=2 for CV",
+    }
+
+    # --- Assemble the mode_map in the exact structure Stage2 expects ---
+    mode_map = {
+        # Stage2 reads: mode_map["conditions"]  (must be DICT)
+        "conditions": conditions_dict,
+        # Stage2 reads: mode_map["metadata"]["pipeline_config"]["L"]
+        # Stage2 reads: mode_map["metadata"]["source_dir"]
+        # Stage2 reads: mode_map["metadata"]["p_hankel"]
+        "metadata": {
+            "pipeline_config": {
+                "L": L,
+                "hankel_depth": cdhsa_params.get("hankel_depth"),
+                "fixed_rank": cdhsa_params.get("fixed_rank"),
+                "d_max_specific": cdhsa_params.get("d_max_specific"),
+            },
+            "source_dir": str(results_dir),
+            "p_hankel": p_hankel,
+            "dataset": "ludovico_01",
+            "n_conditions": n_conditions,
+            "condition_names": condition_names,
+            "steps_run": ["A1-A5", "A6_bypass", "D"],
+            "steps_skipped": ["B/C", "tangent"],
+        },
+        # Stage2 reads: mode_map.get("common_subspace", {})
+        "common_subspace": common_subspace,
+        # Extra info (not read by Stage2, but useful for bookkeeping)
+        "top_n_requested": top_n,
         "generated_at": datetime.now().isoformat(),
     }
+
+    return mode_map
 
 
 def _run_mode_extraction(
@@ -387,26 +430,16 @@ def _run_mode_extraction(
     logger.info("  EXTRACT | %s -> %s", out_dir, json_name)
 
     try:
-        mode_map = _extract_mode_indices(out_dir, top_n=top_n)
+        mode_map = _extract_mode_indices(
+            out_dir,
+            top_n=top_n,
+            cdhsa_params=params.get("cdhsa_params", {}),
+        )
 
-        # Add experiment label from params
+        # Add experiment label (bookkeeping, not read by Stage2)
         mode_map["experiment_label"] = params.get(
             "experiment_label", "ludovico_cdhsa"
         )
-
-        # Add CDHSA parameters used
-        mode_map["cdhsa_params"] = {
-            k: v for k, v in params.get("cdhsa_params", {}).items()
-            if not k.startswith("_")
-        }
-
-        # Add dataset info
-        mode_map["dataset"] = {
-            "name": "ludovico_01",
-            "mode": "S=1, C=auto (all CSVs as conditions)",
-            "steps_run": ["A1-A5", "A6_bypass", "D"],
-            "steps_skipped": ["B/C", "tangent"],
-        }
 
         with open(json_out, "w", encoding="utf-8") as f:
             json.dump(mode_map, f, indent=2, default=str)
@@ -447,7 +480,7 @@ def run_batch(
     After the pipeline completes successfully, extracts mode indices
     and saves mode_map.json to params_dir (mirrors standard pipeline).
     """
-    from src.pipelines.run_cdhsa_ludovico import LudovicoCDHSAConfig, run_ludovico_pipeline
+    from run_cdhsa_ludovico import LudovicoCDHSAConfig, run_ludovico_pipeline
 
     cdhsa = params["cdhsa_params"]
     pre = params.get("preprocessing", {})

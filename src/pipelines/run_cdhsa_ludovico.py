@@ -344,6 +344,7 @@ def build_hankel_ludovico(
         "S": 1,
         "C": C,
         "p": p,
+        "n_channels": p,
         "hankel_depth_requested": hankel_depth,
         "hankel_shapes": [hankel_shapes],
         "depths_used": depths_used,
@@ -357,6 +358,11 @@ def build_hankel_ludovico(
         info["depth_common"] = (
             depths_used[0] if len(set(depths_used)) == 1 else None
         )
+    # p_hankel: row dimension of the Stage-1 Hankel = n_channels * depth
+    # This is what CDHSASpecificModesDynamics (Stage 2) checks against
+    if info["depth_common"] is not None:
+        info["p_hankel"] = p * info["depth_common"]
+        info["hankel_depth"] = info["depth_common"]
 
     return X, info
 
@@ -718,6 +724,55 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
+def _ensure_stacked_d_arrays(
+    D: dict, arrays_dict: dict[str, NDArray]
+) -> None:
+    """Ensure D__W_specific and D__lambda_specific are in arrays_dict.
+
+    CDHSASpecificModesDynamics (Stage 2) loads::
+
+        npz_data["D__W_specific"]       # 3D (C, p*L, r_max) or 2D (p*L, sum_r)
+        npz_data["D__lambda_specific"] # 2D (C, r_max) or 1D (sum_r,)
+        npz_data["D__r_specific"]       # 1D (C,)
+
+    The generic ``_save_arrays_recursive`` may have failed to stack them
+    (different r_c per condition → np.array() raises ValueError).
+    This function pads to uniform shape and saves the stacked versions.
+    """
+    W_list: list[NDArray] = D.get("W_specific", [])
+    lam_list: list[NDArray] = D.get("lambda_specific", [])
+    r_specific: NDArray = D["r_specific"]
+    C = len(r_specific)
+
+    if len(W_list) == 0:
+        return
+
+    # --- W_specific: pad to (C, p, r_max) ---
+    if "D__W_specific" not in arrays_dict:
+        p = W_list[0].shape[0]
+        r_max = int(r_specific.max())
+        W_padded = np.zeros((C, p, r_max), dtype=np.float64)
+        for c in range(C):
+            if c < len(W_list) and W_list[c].size > 0:
+                rc = int(r_specific[c])
+                W_padded[c, :, :rc] = W_list[c][:, :rc]
+        arrays_dict["D__W_specific"] = W_padded
+
+    # --- lambda_specific: pad to (C, r_max) ---
+    if "D__lambda_specific" not in arrays_dict:
+        r_max = int(r_specific.max())
+        lam_padded = np.zeros((C, r_max), dtype=np.float64)
+        for c in range(C):
+            if c < len(lam_list) and len(lam_list[c]) > 0:
+                rc = int(r_specific[c])
+                lam_padded[c, :rc] = lam_list[c][:rc]
+        arrays_dict["D__lambda_specific"] = lam_padded
+
+    # --- r_specific should already be saved, but ensure it ---
+    if "D__r_specific" not in arrays_dict:
+        arrays_dict["D__r_specific"] = r_specific
+
+
 def _save_arrays_recursive(
     d: dict, prefix: str, out: dict[str, NDArray]
 ) -> None:
@@ -831,6 +886,14 @@ def save_results_ludovico(
     _save_arrays_recursive(result['A6'], "A6", arrays_dict)
     if result['D'] is not None:
         _save_arrays_recursive(result['D'], "D", arrays_dict)
+
+        # Ensure D__W_specific and D__lambda_specific exist as stacked
+        # arrays that CDHSASpecificModesDynamics (Stage 2) can load.
+        # _save_arrays_recursive may save them as D__W_specific_c0, c1,
+        # ... if the list elements have different shapes (np.array()
+        # fails silently).  We pad to uniform shape here.
+        _ensure_stacked_d_arrays(result['D'], arrays_dict)
+
     np.savez_compressed(out_dir / "cdhsa_arrays.npz", **arrays_dict)
     print(f"    [OK] cdhsa_arrays.npz  ({len(arrays_dict)} arrays)")
 
