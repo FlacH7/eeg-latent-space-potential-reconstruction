@@ -672,6 +672,13 @@ def _run_km_job(
           f"data shape={data.shape}, out_dir={out_dir}")
     sys.stdout.flush()
 
+    # Each worker process has its own matplotlib state.  Ensure the
+    # plotting style is applied (idempotent; cheap).
+    try:
+        setup_plotting_style()
+    except Exception:
+        pass
+
     # =====================================================================
     # 5. BANDWIDTH OPTIMISATION  (always run, d_job <= 3)
     # =====================================================================
@@ -1665,18 +1672,31 @@ def main() -> int:
             for js in job_specs:
                 job_results.append(_run_km_job(**js))
         else:
-            # Parallel via joblib threads.
-            # Threads (not processes) so figures and numpy arrays can be
-            # shared without pickling.  The Agg backend is thread-safe
-            # for independent Figure objects.
+            # Parallel via joblib PROCESSES (not threads).
+            #
+            # We MUST use processes, not threads, because matplotlib's
+            # mathtext parser (used by bw_optimization.py labels like
+            # r'$\eta_{\rm DB}$ (dimensionless)') relies on module-level
+            # mutable state that is NOT thread-safe.  Concurrent calls
+            # to fig.tight_layout() from multiple threads corrupt the
+            # parser and raise:
+            #   ValueError: Expected end of text, found '$'
+            #
+            # Processes give each worker its own matplotlib state.
+            # Numpy arrays in job_specs are small (~10 MB each for
+            # 600k x 2 floats) so pickling overhead is negligible.
             try:
                 from joblib import Parallel, delayed
             except ImportError:
                 print("  [WARN] joblib not available; falling back to sequential.")
                 job_results = [_run_km_job(**js) for js in job_specs]
             else:
+                # n_jobs=-1 -> use all CPUs.  prefer="processes" forces
+                # process-based parallelism even on non-POSIX systems.
+                # max_nbytes=None keeps arrays in memory (no memmap disk
+                # spill), which is fine for our sizes.
                 job_results = Parallel(
-                    n_jobs=-1, prefer="threads", verbose=0,
+                    n_jobs=-1, backend="loky", verbose=0,
                 )(
                     delayed(_run_km_job)(**js) for js in job_specs
                 )
