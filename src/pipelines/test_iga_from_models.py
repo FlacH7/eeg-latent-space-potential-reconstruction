@@ -308,6 +308,7 @@ if D == 2:
         align_minima=False,
         align_to_zero=False,
         crop_to_valid = True,
+        show_streamlines=False,
         stream_function=result_iga.get('stream_function'),        # NUEVO
         reconstructed_field=result_iga.get('reconstructed_field'),# NUEVO
         reconstructed_drift=result_iga.get('reconstructed_drift'),  # NUEVO
@@ -343,7 +344,7 @@ if D == 2:
     if result_iga.get('nonconservative_force') is not None:
         fig_v = plot_nonconservative_force_2d(
             result_iga['nonconservative_force'], edges,
-            title=f'Fuerza no-conservativa v = f + D·∇U — {model_name.upper()}',
+            title=f'Non-conservative force — {model_name.upper()}',
             crop_to_valid=True,
             skip = 4
         )
@@ -359,7 +360,7 @@ if D == 2:
             nonconservative_force=result_iga.get('nonconservative_force'),
             reconstructed_field=result_iga.get('reconstructed_field'),
             reconstructed_drift=result_iga.get('reconstructed_drift'),
-            title=f'{model_name.upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)',
+            title=f'{model_name.upper()} — U (background) + v (red arrows) + streamlines (white arrows)',
             crop_to_valid=True,
             clip_percentile=99.9,
             skip=4
