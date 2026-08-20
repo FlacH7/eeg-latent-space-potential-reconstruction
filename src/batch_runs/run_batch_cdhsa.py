@@ -81,6 +81,19 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+import threading
+
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+
+try:
+    from src.utils.memory_tracker import MemoryMonitor, get_global_monitor
+    _HAS_MEM_TRACKER = True
+except ImportError:
+    _HAS_MEM_TRACKER = False
 
 # ---------------------------------------------------------------------------
 # Ensure the directory containing run_cdhsa.py is importable
@@ -321,6 +334,9 @@ class CDHSABatchRunner:
         # Generate jobs
         self.all_jobs = _generate_jobs(params)
         self._print_banner()
+
+        # [MEM TRACKING] Per-job memory stats
+        self._job_memory_stats: list[dict] = []
 
     # ------------------------------------------------------------------
     # Project paths
@@ -680,6 +696,109 @@ class CDHSABatchRunner:
         return out_dir
 
     # ------------------------------------------------------------------
+    # Child process memory polling
+    # ------------------------------------------------------------------
+
+    def _poll_child_rss(
+        self, proc: subprocess.Popen, interval: float = 0.5,
+    ) -> tuple[float, list]:
+        """Poll *proc* RSS from the parent process.
+
+        Returns ``(peak_rss_mb, samples_list)``.
+        Stops as soon as the child terminates.
+        """
+        peak_rss = 0.0
+        samples: list[tuple[float, float]] = []   # (elapsed, rss_mb)
+        if not _HAS_PSUTIL:
+            return peak_rss, samples
+        t0 = time.time()
+        try:
+            p = psutil.Process(proc.pid)
+            while proc.poll() is None:
+                try:
+                    rss = p.memory_info().rss / (1024 * 1024)
+                    peak_rss = max(peak_rss, rss)
+                    samples.append((time.time() - t0, rss))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    break
+                time.sleep(interval)
+        except psutil.NoSuchProcess:
+            pass
+        return peak_rss, samples
+
+    # ------------------------------------------------------------------
+    # Per-job memory report
+    # ------------------------------------------------------------------
+
+    def _print_memory_report(self) -> None:
+        """Log + save a per-job peak-RSS summary table."""
+        stats = self._job_memory_stats
+        if not stats:
+            logger.info("[MEM] No hay estadisticas de memoria por job.")
+            return
+
+        sorted_stats = sorted(
+            stats, key=lambda s: s["peak_rss_mb"], reverse=True,
+        )
+
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("  MEMORY REPORT POR JOB  (ordenado por peak RSS)")
+        logger.info("=" * 70)
+
+        hdr = "  %-50s %10s %8s %6s" % (
+            "Job", "Peak RSS", "Elapsed", "Status")
+        logger.info(hdr)
+        logger.info("  " + "-" * 82)
+
+        for s in sorted_stats:
+            status = "OK" if s["success"] else "FAIL"
+            logger.info(
+                "  %-50s %8.1f MB %6.1f s   %s",
+                '%s/%s' % (s["label"], s["session"]),
+                s["peak_rss_mb"],
+                s["elapsed_s"],
+                status,
+            )
+
+        max_s = sorted_stats[0] if sorted_stats else {}
+        logger.info("  " + "-" * 82)
+        logger.info(
+            "  Peak maximo global: %,.1f MB (%s)",
+            max_s.get("peak_rss_mb", 0),
+            max_s.get("label", ""),
+        )
+        n_measured = len([s for s in stats if s["peak_rss_mb"] > 0])
+        logger.info(
+            "  Jobs con memoria medida: %d / %d",
+            n_measured, len(stats),
+        )
+        logger.info("=" * 70)
+
+        # --- save CSV ---
+        if self.output_dir:
+            log_dir = self.output_dir / "batch_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            csv_path = log_dir / ("memory_per_job_%s.csv" % ts)
+            try:
+                with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+                    writer = csv.DictWriter(fh, fieldnames=[
+                        "label", "session", "success", "elapsed_s",
+                        "peak_rss_mb", "n_rss_samples",
+                    ])
+                    writer.writeheader()
+                    for s in stats:
+                        writer.writerow({
+                            k: s[k] for k in
+                            ["label", "session", "success",
+                             "elapsed_s", "peak_rss_mb", "n_rss_samples"]
+                        })
+                logger.info("[MEM] Per-job CSV guardado: %s", csv_path)
+            except OSError as exc:
+                logger.warning("[MEM] Error guardando per-job CSV: %s", exc)
+
+    # ------------------------------------------------------------------
     # Run a single job
     # ------------------------------------------------------------------
 
@@ -706,6 +825,13 @@ class CDHSABatchRunner:
         )
         logger.debug("CMD: %s", " ".join(cmd))
 
+        # [MEM TRACKING] Checkpoint before job
+        if _HAS_MEM_TRACKER:
+            _mon = get_global_monitor()
+            if _mon.is_running:
+                _mon.checkpoint(
+                    'JOB START: %s/%s' % (label, job["session"]))
+
         t0 = time.time()
         cmd_for_log = cmd  # keep reference in case of exception
         try:
@@ -720,19 +846,50 @@ class CDHSABatchRunner:
                 env=child_env,
             )
 
+            # [MEM TRACKING] Poll child process RSS in a daemon thread
+            _child_peak = [0.0]
+            _child_samples: list[tuple[float, float]] = []
+
+            def _poll_thread():
+                pk, samps = self._poll_child_rss(proc)
+                _child_peak[0] = pk
+                _child_samples.extend(samps)
+
+            _thr = threading.Thread(target=_poll_thread, daemon=True)
+            _thr.start()
+
             for line in proc.stdout:
                 logger.info("  [PIPE] %s", line.rstrip())
 
             proc.wait()
+            _thr.join(timeout=3.0)
+
             elapsed = time.time() - t0
             success = proc.returncode == 0
+            peak_mb = _child_peak[0]
+
+            # [MEM TRACKING] Record per-job stats
+            self._job_memory_stats.append({
+                "label": label,
+                "session": job["session"],
+                "success": success,
+                "elapsed_s": round(elapsed, 2),
+                "peak_rss_mb": round(peak_mb, 1),
+                "n_rss_samples": len(_child_samples),
+            })
 
             self._write_csv_log(job, success, proc.returncode, elapsed, cmd)
 
+            if peak_mb > 0:
+                logger.info(
+                    "  [MEM] Peak child RSS: %,.1f MB (%d samples)",
+                    peak_mb, len(_child_samples),
+                )
+
             if success:
                 logger.info(
-                    "OK | %s/%s (%.1f s)",
-                    label, job["session"], elapsed,
+                    "OK | %s/%s (%.1f s, peak %.1f MB)",
+                    label, job["session"], elapsed, peak_mb,
                 )
             else:
                 logger.error(
@@ -740,6 +897,13 @@ class CDHSABatchRunner:
                     label, job["session"],
                     proc.returncode,
                 )
+
+            # [MEM TRACKING] Checkpoint after job
+            if _HAS_MEM_TRACKER:
+                _mon = get_global_monitor()
+                if _mon.is_running:
+                    _mon.checkpoint(
+                        'JOB END: %s/%s' % (label, job["session"]))
 
             return key, success
 
@@ -995,6 +1159,45 @@ class CDHSABatchRunner:
     # ------------------------------------------------------------------
 
     def run(self) -> int:
+        # [MEM TRACKING] Start global memory monitor for the orchestrator
+        _monitor = None
+        if _HAS_MEM_TRACKER:
+            _monitor = get_global_monitor(
+                logger=logger, interval_sec=0.5,
+                spike_threshold_mb=100,
+            )
+            _monitor.start()
+
+        try:
+            return self._run_inner()
+        finally:
+            # [MEM TRACKING] Stop monitor, generate final reports
+            if _monitor is not None and _monitor.is_running:
+                _monitor.stop()
+                _monitor.report()
+                if _monitor._checkpoints:
+                    _monitor.summary()
+
+                # Save timeline CSV
+                if self.output_dir:
+                    log_dir = self.output_dir / "batch_logs"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    tl_path = log_dir / ("memory_timeline_%s.csv" % ts)
+                    _monitor.save_timeline_csv(str(tl_path))
+                    logger.info("[MEM] Timeline CSV: %s", tl_path)
+
+                # Top Python allocations (tracemalloc)
+                try:
+                    _monitor.top_allocations(10)
+                except Exception:
+                    pass
+
+            # Per-job peak-RSS summary table + CSV
+            self._print_memory_report()
+
+    def _run_inner(self) -> int:
+        """Original run() logic, extracted so run() can wrap with monitoring."""
         if self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
         if self.cache_dir:
