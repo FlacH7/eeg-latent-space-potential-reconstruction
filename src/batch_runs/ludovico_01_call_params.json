@@ -21,46 +21,12 @@
 
   "methods": [
     {
-      "label": "hankel+pca+markov_fastest",
+      "label": "hankel+cdhsa+top_n",
       "stage1_embedding": "hankel",
       "stage1_params": {"depth": 10},
-      "stage2_dynamics": "pca",
-      "stage2_params": {"n_components":20},
-      "stage3_selection": "markov_fastest",
-      "stage3_params": {
-        "n_bins": 10,
-        "search_strategy": "exhaustive"
-      }
-    },
-    {
-      "label": "hankel+pca+markov_slowest",
-      "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
-      "stage2_dynamics": "pca",
-      "stage2_params": {"n_components":20},
-      "stage3_selection": "markov_slowest",
-      "stage3_params": {
-        "n_bins": 10,
-        "search_strategy": "exhaustive"
-      }
-    },
-    {
-      "label": "hankel+pca+top_n",
-      "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
-      "stage2_dynamics": "pca",
-      "stage2_params": {"n_components":20},
-      "stage3_selection": "top_n",
-      "stage3_params": {}
-    },
-    {
-      "label": "hankel+diffusion_maps+top_n",
-      "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
-      "stage2_dynamics": "diffusion_maps",
+      "stage2_dynamics": "cdhsa_specific_modes",
       "stage2_params": {
-        "svd_rank": 50,
-        "k": 100
+        "mode_map_path": "params/mode_map_4_modes_ludovico_01_all_conditions_full.json"
       },
       "stage3_selection": "top_n",
       "stage3_params": {}
@@ -88,7 +54,7 @@
     "n_bins": 10,
     "workers": null,
     "search_strategy": "exhaustive",
-    "km_bins": 15
+    "km_bins": 12
   },
 
   "execution": {

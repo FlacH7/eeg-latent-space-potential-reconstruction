@@ -133,6 +133,60 @@ def resolve_super_subject_subject_ids(
     return list(range(start_idx, end_idx + 1))
 
 
+def resolve_all_subject_ids(
+    ss_cfg: dict,
+) -> list[list[int]]:
+    """Resolve subject-id lists for **all** selected super-subjects.
+
+    This is a convenience for the batch runner, which needs the full
+    subject pool (across all super-subjects) to compute the global
+    channel intersection.
+
+    Parameters
+    ----------
+    ss_cfg : dict
+        The ``"super_subjects"`` block from the batch JSON.  Must
+        contain ``"selected"`` and either ``"groups"`` or
+        ``"subjects_per_super_subject"`` + ``"subject_start_offset"``.
+
+    Returns
+    -------
+    list[list[int]]
+        One list of subject indices per selected super-subject.
+    """
+    groups = ss_cfg.get("groups")
+    # JSON object keys are strings -> coerce
+    if groups is not None:
+        groups = {int(k) if k.isdigit() else k: v for k, v in groups.items()}
+
+    result: list[list[int]] = []
+    for sid in ss_cfg["selected"]:
+        ids = _resolve_subject_ids_for_job_static(sid, ss_cfg, groups)
+        result.append(ids)
+    return result
+
+
+def _resolve_subject_ids_for_job_static(
+    super_subject_id: int,
+    ss_cfg: dict,
+    groups: dict | None = None,
+) -> list[int]:
+    """Static version of the per-job resolver (no logging dependency)."""
+    if groups is not None:
+        key = super_subject_id if super_subject_id in groups else str(super_subject_id)
+        if key not in groups:
+            raise KeyError(
+                f"super_subject_id={super_subject_id} not in groups "
+                f"(keys: {list(groups.keys())})"
+            )
+        return [int(x) for x in groups[key]]
+
+    sppss = ss_cfg.get("subjects_per_super_subject", 20)
+    offset = ss_cfg.get("subject_start_offset", 1)
+    start = offset + (super_subject_id - 1) * sppss
+    return list(range(start, start + sppss))
+
+
 # ---------------------------------------------------------------------------
 # Channel harmonisation across raws
 # ---------------------------------------------------------------------------
@@ -191,6 +245,122 @@ def _harmonise_channels(raws: list[mne.io.Raw]) -> list[mne.io.Raw]:
         )
 
     return harmonised
+
+
+def compute_channel_intersection(
+    session: str,
+    task: str,
+    *,
+    subject_pools: list[list[int]] | None = None,
+    ss_cfg: dict | None = None,
+    db_path: str | Path | None = None,
+    verbose: bool = False,
+) -> list[str]:
+    """Compute the **global** channel intersection across ALL subjects
+    that participate in any super-subject for a given (session, task).
+
+    The CD-HSA modes are learned on the intersection of channels across
+    the entire subject pool.  When the batch runner dispatches per-
+    super-subject jobs, each job's ``load_super_subject_eeg`` only
+    harmonises channels *within* that super-subject's subjects — which
+    may yield a **larger** set than the CD-HSA intersection.  Passing
+    this pre-computed global intersection to the pipeline ensures the
+    Hankel dimensionality matches the CD-HSA ``W_specific`` matrix.
+
+    The function loads each subject's ``.set`` header (metadata only,
+    no data) to read ``ch_names``, keeping memory usage minimal.
+
+    Parameters
+    ----------
+    session, task : str
+        BIDS-style labels.
+    subject_pools : list[list[int]] | None
+        Pre-resolved subject-id lists (one per super-subject).  When
+        provided, the union of all pools is used.  Mutually exclusive
+        with ``ss_cfg``.
+    ss_cfg : dict | None
+        The ``"super_subjects"`` block from the batch JSON (contains
+        ``"selected"``, ``"groups"`` / ``"subjects_per_super_subject"``).
+        Used to resolve the pools internally when ``subject_pools`` is
+        not given.
+    db_path : str | Path | None
+        Dataset root.  Falls back to ``DB_TEST_RETEST_GEDAI_PATH``.
+    verbose : bool
+        Print progress.
+
+    Returns
+    -------
+    list[str]
+        Sorted channel names in the global intersection (order taken
+        from the first subject that has them).
+    """
+    from src.latent_space_extraction.test_retest_gedai_eeg import (
+        load_test_retest_gedai_eeg_from_ids,
+    )
+
+    # Resolve the full set of unique subject IDs
+    if subject_pools is not None:
+        all_ids = sorted(set(sid for pool in subject_pools for sid in pool))
+    elif ss_cfg is not None:
+        pools = resolve_all_subject_ids(ss_cfg)
+        all_ids = sorted(set(sid for pool in pools for sid in pool))
+    else:
+        raise ValueError(
+            "compute_channel_intersection requires either subject_pools or ss_cfg."
+        )
+
+    if verbose:
+        print(f"  [ChannelIntersection] Computing intersection over "
+              f"{len(all_ids)} subjects ({session}/{task})...")
+
+    # Load each subject's header to read channel names
+    all_ch_sets: list[list[str]] = []
+    n_loaded = 0
+    for subj_idx in all_ids:
+        subject = f"sub-{subj_idx:02d}"
+        try:
+            # preload=False and no crop -> reads header only (minimal I/O)
+            raw_i = load_test_retest_gedai_eeg_from_ids(
+                subject=subject,
+                session=session,
+                task=task,
+                db_path=db_path,
+                t_start=None,
+                t_stop=None,
+                preload=False,
+                verbose=False,
+            )
+            all_ch_sets.append(list(raw_i.ch_names))
+            n_loaded += 1
+            # Free memory immediately
+            del raw_i
+        except (FileNotFoundError, ValueError):
+            continue
+
+    if not all_ch_sets:
+        raise FileNotFoundError(
+            f"Could not load any subject headers for session={session}, "
+            f"task={task}. Cannot compute channel intersection."
+        )
+
+    if verbose:
+        print(f"  [ChannelIntersection] Loaded headers from {n_loaded}/"
+              f"{len(all_ids)} subjects")
+        per_subject_counts = [len(s) for s in all_ch_sets]
+        print(f"  [ChannelIntersection] Channels per subject: "
+              f"min={min(per_subject_counts)}, max={max(per_subject_counts)}, "
+              f"unique sets={len(set(tuple(sorted(s)) for s in all_ch_sets))}")
+
+    # Compute intersection preserving the first subject's order
+    intersection = list(all_ch_sets[0])
+    for ch_set in all_ch_sets[1:]:
+        intersection = [ch for ch in intersection if ch in ch_set]
+
+    if verbose:
+        print(f"  [ChannelIntersection] Global intersection: "
+              f"{len(intersection)} channels")
+
+    return intersection
 
 
 # ---------------------------------------------------------------------------

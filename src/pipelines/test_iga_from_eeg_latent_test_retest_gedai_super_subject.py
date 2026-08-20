@@ -31,6 +31,29 @@ CLI/stage API; the only differences are:
    {session}/task_{task}_latent_dim_{latent_dim}_{spec_label}_{spec_hash}/
    from{t_start}s_to_{t_end}s.npz``
 
+HIGH-DIMENSIONAL MODE (D >= 4)
+------------------------------
+When ``analysis_dim >= 4``, the downstream KM/BW/potential pipeline is
+**split** into independent sub-jobs of dimension 2 or 3 to avoid the
+curse of dimensionality.  The splitting rule is:
+
+* If ``D`` is divisible by 2  -> chunks of 2 (e.g. D=4 -> [[0,1],[2,3]])
+* elif ``D`` is divisible by 3 -> chunks of 3 (e.g. D=9 -> three 3D jobs)
+* else -> last 3 dims go into a single 3D job + 2D jobs for the rest
+  (e.g. D=5 -> [[0,1],[2,3,4]]; D=7 -> [[0,1],[2,3],[4,5,6]])
+
+Each sub-job runs the full BW optimisation + KM extraction + potential
+reconstruction + 2D/slice plotting **independently** (in parallel via
+``joblib.Parallel(prefer="threads")``).  The per-job figures are then
+**composited** into a single horizontal-row PNG per canonical figure
+name (``potential_2d.png``, ``bw_optimisation.png``,
+``km_components_drift.png``, etc.).  Each subplot is labeled with the
+dimensions it represents (``dim1-2``, ``dim3-4``, ``dim3-4-5``...).
+
+Per-job ``potential_data_{dim_label}.npz`` files are saved with the
+dim_indices recorded in the metadata, so post-processing knows which
+dimensions each potential came from.
+
 Usage
 -----
 From the project root::
@@ -55,7 +78,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import shutil
 import sys
 import time
 import warnings
@@ -186,7 +211,7 @@ def _parse_args() -> argparse.Namespace:
         "--subject-start-offset", type=int, default=1,
         help=(
             "Index of the first subject in the dataset (typically 1 for "
-            "sub-01). Used by auto-resolution. Default: 1."
+            "sub-01).  Used by auto-resolution. Default: 1."
         ),
     )
     # ---- Session / task ----
@@ -197,6 +222,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task", type=str, required=True,
         help="Task label (eyesclosed, eyesopen, mathematic, memory, music)",
+    )
+    parser.add_argument(
+        "--channel-intersection", type=str, default=None,
+        help=(
+            "JSON list of channel names representing the global channel "
+            "intersection across all super-subjects. When provided, the "
+            "concatenated raw is restricted to exactly these channels before "
+            "any processing. This ensures CD-HSA mode dimensionality "
+            "consistency across super-subjects with different channel counts."
+        ),
     )
     parser.add_argument(
         "--db-path", type=str, default=None,
@@ -237,7 +272,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-dynamics", type=str, default=None,
-        choices=["pca_ica", "pca", "dmd", "diffusion_maps"],
+        choices=["pca_ica", "pca", "dmd", "diffusion_maps", "cdhsa_specific_modes"],
         help="Stage 2 dynamics (new API).",
     )
     parser.add_argument(
@@ -339,6 +374,18 @@ def _parse_args() -> argparse.Namespace:
         "--no-save-potential", action="store_true",
         help="Deshabilitar el guardado del potencial",
     )
+    # ---- High-dimensional split control ----
+    parser.add_argument(
+        "--split-threshold", type=int, default=4,
+        help="Analysis-dim threshold above which the pipeline splits into "
+             "sub-jobs of dim 2 or 3 (default: 4). Set to a large value "
+             "(e.g. 99) to disable splitting entirely.",
+    )
+    parser.add_argument(
+        "--no-parallel", action="store_true",
+        help="Run sub-jobs sequentially instead of via joblib.Parallel. "
+             "Useful for debugging.",
+    )
 
     return parser.parse_args()
 
@@ -407,6 +454,10 @@ def _resolve_pipeline_spec(args: argparse.Namespace) -> dict:
             p2.setdefault("alpha", args.diffusion_alpha)
         if s2 == "pca_ica":
             p2.setdefault("ica_method", args.ica_method)
+        if s2 == "cdhsa_specific_modes":
+            # Auto-inject --task as condition so the mode_map resolves
+            # the correct condition index without the user specifying it.
+            p2.setdefault("condition", args.task)
         if s3 in ("markov_fastest", "markov_slowest"):
             p3.setdefault("n_bins", args.n_bins)
             p3.setdefault("search_strategy", args.search_strategy)
@@ -461,6 +512,620 @@ def _spec_hash(spec: dict) -> str:
 def _super_subject_label(super_subject_id: int) -> str:
     """BIDS-style label for the super-subject, e.g. ``super_subject-01``."""
     return f"super_subject-{super_subject_id:02d}"
+
+
+# ---------------------------------------------------------------------------
+# HIGH-DIMENSIONAL SPLIT HELPERS
+# ---------------------------------------------------------------------------
+
+def _split_dimensions(D: int) -> list[list[int]]:
+    """
+    Partition ``D`` latent dimensions into independent sub-jobs of dim 2 or 3.
+
+    Rules (in priority order):
+      1. If ``D`` is divisible by 2  -> chunks of 2.
+      2. elif ``D`` is divisible by 3 -> chunks of 3.
+      3. else -> the LAST 3 dims go in a single 3D chunk; the remaining
+         dims (which are guaranteed even) are split into 2D chunks.
+
+    For ``D <= 3`` there is no real split -- the function returns a single
+    chunk covering all dimensions.
+
+    Examples
+    --------
+    >>> _split_dimensions(1)
+    [[0]]
+    >>> _split_dimensions(2)
+    [[0, 1]]
+    >>> _split_dimensions(3)
+    [[0, 1, 2]]
+    >>> _split_dimensions(4)
+    [[0, 1], [2, 3]]
+    >>> _split_dimensions(5)
+    [[0, 1], [2, 3, 4]]
+    >>> _split_dimensions(6)
+    [[0, 1], [2, 3], [4, 5]]
+    >>> _split_dimensions(7)
+    [[0, 1], [2, 3], [4, 5, 6]]
+    >>> _split_dimensions(9)
+    [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+    >>> _split_dimensions(11)
+    [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9, 10]]
+    """
+    if D <= 0:
+        raise ValueError(f"D must be positive, got D={D}")
+    if D <= 3:
+        return [list(range(D))]
+    if D % 2 == 0:
+        return [list(range(i, i + 2)) for i in range(0, D, 2)]
+    if D % 3 == 0:
+        return [list(range(i, i + 3)) for i in range(0, D, 3)]
+    # D not divisible by 2 nor 3 -> last 3 dims as one 3D chunk + 2D chunks
+    # for the (even-length) remainder.
+    last_3 = list(range(D - 3, D))
+    rest = list(range(0, D - 3))
+    chunks = [rest[i:i + 2] for i in range(0, len(rest), 2)]
+    chunks.append(last_3)
+    return chunks
+
+
+def _dim_label(indices: list[int]) -> str:
+    """
+    Human-readable label for a sub-job, 1-indexed to match the user's
+    "dim1-2" convention.
+
+    Examples
+    --------
+    >>> _dim_label([0, 1])
+    'dim1-2'
+    >>> _dim_label([2, 3])
+    'dim3-4'
+    >>> _dim_label([2, 3, 4])
+    'dim3-4-5'
+    """
+    return "dim" + "-".join(str(i + 1) for i in indices)
+
+
+def _build_job_config(
+    base_config: dict,
+    d_job: int,
+    args: argparse.Namespace,
+    latent_dim: int,
+    ss_label: str,
+    session: str,
+    task: str,
+    spec_label: str,
+) -> dict:
+    """
+    Build a per-job KM config dict.  Mirrors the original "CONFIGURATION"
+    block but parameterised by the sub-job dimensionality ``d_job``.
+    """
+    config = base_config.copy()
+    config.update({
+        "model_name": (
+            f"testretest_gedai_super_subject_{ss_label}_"
+            f"{session}_{task}_d{latent_dim}_{spec_label}"
+        ),
+        "D": d_job,
+        "bins": [args.km_bins] * d_job,
+        "drift_components": list(range(d_job)),
+        "diff_components": [(i, i) for i in range(d_job)],
+        "degree": 2,
+    })
+    return config
+
+
+# ---------------------------------------------------------------------------
+# PER-JOB DOWNSTREAM PIPELINE
+# ---------------------------------------------------------------------------
+
+# Canonical figure names that may be produced by a single sub-job.
+# Used by the compositor to know which PNGs to look for in each per-job dir.
+_CANONICAL_FIGURE_NAMES_D2 = [
+    "bw_optimisation",
+    "km_components_drift",
+    "km_components_diffusion",
+    "potential_1d",
+    "potential_2d",
+    "potential_2d_streamlines",
+    "potential_2d_residual",
+    "potential_2d_nonconservative_force",
+    "potential_2d_combined",
+]
+_CANONICAL_FIGURE_NAMES_D3 = [
+    "bw_optimisation",
+    "km_components_drift",
+    "km_components_diffusion",
+    "potential_1d",
+    "potential_slice_x1_x2",
+    "potential_slice_x1_x3",
+    "potential_slice_x2_x3",
+]
+
+
+def _run_km_job(
+    data: np.ndarray,
+    dt: float,
+    config: dict,
+    dim_indices: list[int],
+    dim_label: str,
+    out_dir: Path,
+    save_potential_flag: bool,
+    metadata: dict,
+    save_potential_filename: str,
+) -> dict:
+    """
+    Run the full downstream pipeline (BW + KM + potential + plots) for ONE
+    sub-series of dimension ``d_job = len(dim_indices)``.
+
+    All figures are saved to ``out_dir`` with their canonical names (no
+    per-job suffix on the filename -- the per-job isolation comes from
+    ``out_dir`` being a per-job subdir).
+
+    Returns a metadata dict useful for the compositor:
+      ``{dim_indices, dim_label, D, out_dir, bw_opt, drift, diffusion,
+         edges, density, result_iga, config, save_potential_filename}``
+    """
+    d_job = data.shape[1]
+    model_name = config["model_name"]
+    print(f"\n  [{dim_label}] Running KM job: D={d_job}, "
+          f"data shape={data.shape}, out_dir={out_dir}")
+    sys.stdout.flush()
+
+    # Each worker process has its own matplotlib state.  Ensure the
+    # plotting style is applied (idempotent; cheap).
+    try:
+        setup_plotting_style()
+    except Exception:
+        pass
+
+    # =====================================================================
+    # 5. BANDWIDTH OPTIMISATION  (always run, d_job <= 3)
+    # =====================================================================
+    print(f"  [{dim_label}] Bandwidth optimisation ...")
+    sys.stdout.flush()
+    # n_jobs=1 inside optimal_bw to avoid nested parallelism; the outer
+    # joblib.Parallel handles parallelism across sub-jobs.
+    result_bw = optimal_bw(
+        data=data,
+        bins=config["bins"],
+        dt=dt,
+        p=2,
+        kernel="epanechnikov",
+        theoretical=None,
+        sigma_smooth=1.0,
+        n_candidates=30,
+        n_jobs=1,
+        plot=True,
+        auto_weight=True,
+    )
+    bw_opt = result_bw["optimal_bw"]
+    sys.stdout.flush()
+    print(f"  [{dim_label}] Optimal bandwidth: {bw_opt:.4f}")
+    print(f"  [{dim_label}] Drift error: "
+          f"{result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
+    print(f"  [{dim_label}] Diffusion error: "
+          f"{result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
+
+    if "fig" in result_bw and result_bw["fig"] is not None:
+        fig_bw = result_bw["fig"]
+        # Add dim_label as suptitle to make the figure self-identifying
+        try:
+            fig_bw.suptitle(f"BW optimisation -- {dim_label}", fontsize=12)
+        except Exception:
+            pass
+        fig_bw.savefig(out_dir / "bw_optimisation.png", dpi=150, bbox_inches="tight")
+        plt.close(fig_bw)
+
+    # =====================================================================
+    # 6. ESTIMATE KM COEFFICIENTS
+    # =====================================================================
+    print(f"  [{dim_label}] KM coefficient estimation ...")
+    sys.stdout.flush()
+
+    drift, diffusion, edges = extract_km_coefficients(
+        data,
+        bins=config["bins"],
+        p=2,
+        bw=bw_opt,
+        kernel="epanechnikov",
+        dt=dt,
+        sigma_smooth=1.0,
+        density_threshold=0.01,
+    )
+    print(f"  [{dim_label}] Drift shape    : {drift.shape}")
+    print(f"  [{dim_label}] Diffusion shape: {diffusion.shape}")
+    print(f"  [{dim_label}] Bins           : {[len(e) for e in edges]}")
+
+    # =====================================================================
+    # 7. EMPIRICAL DENSITY
+    # =====================================================================
+    hist_edges = []
+    for d in range(d_job):
+        c = edges[d]
+        half = (c[1] - c[0]) / 2.0 if len(c) > 1 else 0.5
+        e = np.concatenate([[c[0] - half], c + half])
+        hist_edges.append(e)
+
+    density, _ = np.histogramdd(data, bins=hist_edges)
+    density = density.astype(float)
+    print(f"  [{dim_label}] Density shape: {density.shape}")
+
+    # =====================================================================
+    # 8. PLOT KM COMPONENTS
+    # =====================================================================
+    print(f"  [{dim_label}] Plot KM components ...")
+    figs_km = plot_km_components(
+        drift, diffusion, edges,
+        drift_components=config["drift_components"],
+        diff_components=config["diff_components"],
+        fixed_coords=None,
+        theoretical=None,
+        figsize=(12, 8),
+    )
+    for key, fname in [("drift", "km_components_drift.png"),
+                       ("diffusion", "km_components_diffusion.png")]:
+        fig_km = figs_km.get(key)
+        if fig_km is None:
+            continue
+        try:
+            fig_km.suptitle(
+                f"KM {key} -- {dim_label} -- {model_name}",
+                fontsize=13,
+            )
+            fig_km.tight_layout(rect=[0, 0, 1, 0.95])
+        except Exception:
+            pass
+        fig_km.savefig(out_dir / fname, dpi=150, bbox_inches="tight")
+        plt.close(fig_km)
+    print(f"  [{dim_label}] Saved km_components_drift.png, "
+          f"km_components_diffusion.png")
+
+    # =====================================================================
+    # 9. 1D POTENTIAL RECONSTRUCTION
+    # =====================================================================
+    print(f"  [{dim_label}] 1D potential reconstruction ...")
+    U_rec_1d = reconstruct_potential_1D(
+        drift, diffusion, edges,
+        density=density,
+        degree=config["degree"],
+    )
+
+    fig_pot_1d = plot_potential(
+        U_rec_1d, edges,
+        theoretical=None,
+        component_labels=[f"x{j + 1}" for j in range(d_job)],
+        figsize=(5 * d_job, 4),
+    )
+    try:
+        fig_pot_1d.suptitle(
+            f"Reconstructed 1D potential (IgA) -- {dim_label} -- "
+            f"{model_name.upper()}",
+            fontsize=12,
+        )
+        fig_pot_1d.tight_layout(rect=[0, 0, 1, 0.95])
+    except Exception:
+        pass
+    fig_pot_1d.savefig(out_dir / "potential_1d.png", dpi=150, bbox_inches="tight")
+    plt.close(fig_pot_1d)
+    print(f"  [{dim_label}] Saved potential_1d.png")
+
+    # =====================================================================
+    # 10. FULL MULTIDIMENSIONAL POTENTIAL RECONSTRUCTION
+    # =====================================================================
+    print(f"  [{dim_label}] Full multidim potential reconstruction ...")
+    sys.stdout.flush()
+    result_iga = reconstruct_potential(
+        drift, diffusion, edges,
+        density=density,
+        method="iga",
+        return_full=True,
+        degree=config["degree"],
+        decompose_helmholtz=True,
+        density_threshold=0.01,
+        rtol=1e-3,
+        atol=1e-12,
+        compute_stream_function=True,
+    )
+
+    U_rec = result_iga["potential"]
+    print(f"  [{dim_label}] Reconstructed potential shape: {U_rec.shape}")
+    print(f"  [{dim_label}] Method: Galerkin-B-spline (degree={config['degree']})")
+
+    # Quality metrics
+    rank_D = result_iga["rank_D"]
+    condition_D = result_iga["condition_D"]
+    frac_low_rank = (
+        np.mean(rank_D < d_job) if np.any(~np.isnan(rank_D)) else 0.0
+    )
+    print(f"  [{dim_label}] Fraction cells with rank_D < {d_job}: "
+          f"{frac_low_rank:.2%}")
+    print(f"  [{dim_label}] Condition D (median): "
+          f"{np.nanmedian(condition_D):.2e}")
+    print(f"  [{dim_label}] Condition D (max)   : "
+          f"{np.nanmax(condition_D):.2e}")
+
+    if "eta" in result_iga:
+        eta = result_iga["eta"]
+        is_eq = result_iga["is_equilibrium"]
+        print(f"  [{dim_label}] Non-equilibrium metric eta: {eta:.4f}")
+        print(f"  [{dim_label}] Detailed balance? {is_eq} "
+              f"(threshold eta < 0.1)")
+
+    # =====================================================================
+    # 10b. SAVE POTENTIAL DATA FOR POST-PROCESSING
+    # =====================================================================
+    if save_potential_flag:
+        print(f"  [{dim_label}] Saving potential data ...")
+        # Augment metadata with dim-specific info.
+        meta_with_dims = dict(metadata)
+        meta_with_dims["dim_indices"] = list(dim_indices)
+        meta_with_dims["dim_label"] = dim_label
+        meta_with_dims["job_D"] = d_job
+        potential_path = save_potential(
+            result_iga=result_iga,
+            edges=edges,
+            density=density,
+            config=config,
+            out_dir=out_dir,
+            metadata=meta_with_dims,
+            filename=save_potential_filename,
+        )
+        print(f"  [{dim_label}] Potential data saved: {potential_path}")
+
+    # =====================================================================
+    # 11. PLOT POTENTIAL 2D / SLICES
+    # =====================================================================
+    print(f"  [{dim_label}] Plot potential 2D / slices ...")
+    if d_job == 2:
+        # --- potential_2d.png (without streamlines) ---
+        fig_pot_2d = plot_potential_2d(
+            U_rec, edges,
+            title_est=f"{model_name.upper()} -- Reconstructed -- {dim_label}",
+            figsize=(12, 5),
+            unify_colorbar=True,
+            align_minima=True,
+            align_to_zero=True,
+            crop_to_valid=True,
+            show_streamlines=False,
+            stream_function=result_iga.get('stream_function'),
+            reconstructed_field=result_iga.get('reconstructed_field'),
+        )
+        if fig_pot_2d is None:
+            fig_pot_2d = plt.gcf()
+        fig_pot_2d.savefig(out_dir / "potential_2d.png", dpi=150,
+                            bbox_inches="tight")
+        plt.close(fig_pot_2d)
+        print(f"  [{dim_label}] Saved potential_2d.png")
+
+        # --- potential_2d_streamlines.png ---
+        fig_pot_2d_sl = plot_potential_2d(
+            U_rec, edges,
+            title_est=f"{model_name.upper()} -- Reconstructed -- {dim_label}",
+            figsize=(12, 5),
+            unify_colorbar=True,
+            align_minima=True,
+            align_to_zero=True,
+            crop_to_valid=True,
+            stream_function=result_iga.get('stream_function'),
+            reconstructed_field=result_iga.get('reconstructed_field'),
+        )
+        if fig_pot_2d_sl is None:
+            fig_pot_2d_sl = plt.gcf()
+        fig_pot_2d_sl.savefig(out_dir / "potential_2d_streamlines.png",
+                              dpi=150, bbox_inches="tight")
+        plt.close(fig_pot_2d_sl)
+        print(f"  [{dim_label}] Saved potential_2d_streamlines.png")
+
+        # --- potential_2d_residual.png ---
+        if "residual" in result_iga:
+            residual = result_iga["residual"]
+            r_norm = np.sqrt(np.nansum(residual**2, axis=0))
+            x_c, y_c = edges
+            X, Y = np.meshgrid(x_c, y_c, indexing="ij")
+            fig_res, ax_res = plt.subplots(figsize=(6, 5))
+            cs = ax_res.contourf(
+                X, Y, np.nan_to_num(r_norm, nan=0),
+                levels=20, cmap="magma",
+            )
+            # Capture the return value of contourf (a QuadContourSet,
+            # NOT an AxesImage) so colorbar works without relying on
+            # ax.images which would be empty for contourf.
+            fig_res.colorbar(cs, ax=ax_res, label="||r||")
+            ax_res.set_xlabel("x")
+            ax_res.set_ylabel("y")
+            ax_res.set_title(
+                f"Residuo Helmholtz -- {dim_label} -- {model_name.upper()}"
+            )
+            ax_res.axis("equal")
+            fig_res.tight_layout()
+            fig_res.savefig(out_dir / "potential_2d_residual.png",
+                            dpi=150, bbox_inches="tight")
+            plt.close(fig_res)
+            print(f"  [{dim_label}] Saved potential_2d_residual.png")
+
+        # --- potential_2d_nonconservative_force.png ---
+        if result_iga.get('nonconservative_force') is not None:
+            fig_v = plot_nonconservative_force_2d(
+                result_iga['nonconservative_force'], edges,
+                title=f"Fuerza no-conservativa v -- {dim_label} -- "
+                      f"{model_name.upper()}",
+                crop_to_valid=True,
+            )
+            if fig_v is not None:
+                fig_v.savefig(out_dir / "potential_2d_nonconservative_force.png",
+                              dpi=150, bbox_inches="tight")
+                plt.close(fig_v)
+                print(f"  [{dim_label}] Saved potential_2d_nonconservative_force.png")
+
+        # --- potential_2d_combined.png ---
+        if (result_iga.get('reconstructed_field') is not None
+                or result_iga.get('nonconservative_force') is not None):
+            fig_comb = plot_potential_combined_2d(
+                U_rec, edges,
+                stream_function=result_iga.get('stream_function'),
+                nonconservative_force=result_iga.get('nonconservative_force'),
+                reconstructed_field=result_iga.get('reconstructed_field'),
+                title=f"{model_name.upper()} -- {dim_label} -- "
+                      f"U + v + streamlines",
+                crop_to_valid=True,
+            )
+            if fig_comb is not None:
+                fig_comb.savefig(out_dir / "potential_2d_combined.png",
+                                 dpi=150, bbox_inches="tight")
+                plt.close(fig_comb)
+                print(f"  [{dim_label}] Saved potential_2d_combined.png")
+
+    elif d_job == 3:
+        # 3 slices: (0,1), (0,2), (1,2)
+        dim_pairs = [(0, 1), (0, 2), (1, 2)]
+        for dims in dim_pairs:
+            fig_slice = plot_potential_slice(
+                U_rec, edges, dims=dims,
+                fixed_coords={d: 0.0 for d in range(d_job) if d not in dims},
+                title=f"{model_name.upper()} -- {dim_label} -- "
+                      f"slice x{dims[0]+1}-x{dims[1]+1}",
+                figsize=(12, 5),
+                unify_colorbar=True,
+                align_minima=True,
+                align_to_zero=True,
+                crop_to_valid=True,
+            )
+            if fig_slice is None:
+                fig_slice = plt.gcf()
+            fname = f"potential_slice_x{dims[0]+1}_x{dims[1]+1}.png"
+            fig_slice.savefig(out_dir / fname, dpi=150, bbox_inches="tight")
+            plt.close(fig_slice)
+            print(f"  [{dim_label}] Saved {fname}")
+    else:
+        print(f"  [{dim_label}] (No 2D/slice plots for d_job={d_job})")
+
+    sys.stdout.flush()
+    return {
+        "dim_indices": list(dim_indices),
+        "dim_label": dim_label,
+        "D": d_job,
+        "out_dir": out_dir,
+        "bw_opt": bw_opt,
+        "drift": drift,
+        "diffusion": diffusion,
+        "edges": edges,
+        "density": density,
+        "result_iga": result_iga,
+        "config": config,
+        "save_potential_filename": save_potential_filename,
+    }
+
+
+# ---------------------------------------------------------------------------
+# COMPOSITE FIGURE BUILDER
+# ---------------------------------------------------------------------------
+
+def _compose_horizontal(
+    image_paths: list[Path],
+    labels: list[str],
+    out_path: Path,
+    dpi: int = 150,
+    title: str | None = None,
+) -> Path | None:
+    """
+    Composite N PNG images into a single horizontal-row image (1 row x N
+    columns).  Each subplot is labeled with the corresponding ``labels``
+    entry (typically the dim_label of the sub-job).
+
+    Returns the output path, or ``None`` if no images were provided.
+    """
+    n = len(image_paths)
+    if n == 0:
+        return None
+
+    # Read images
+    images = []
+    for p in image_paths:
+        try:
+            im = plt.imread(str(p))
+            images.append(im)
+        except Exception as e:
+            print(f"  [compose] WARN: could not read {p}: {e}")
+
+    if not images:
+        return None
+
+    # Single image: just copy
+    if len(images) == 1:
+        shutil.copy(str(image_paths[0]), str(out_path))
+        print(f"  [compose] Single image -> {out_path.name}")
+        return out_path
+
+    # Determine per-subplot width based on image aspect ratios
+    # Each subplot gets equal width; subplot height = max image height
+    sub_w = 7  # inches per subplot
+    max_h_in = max(im.shape[0] / dpi for im in images)
+    fig_h = max_h_in + 1.0   # +1 inch for title
+    fig_w = sub_w * len(images)
+
+    fig, axes = plt.subplots(
+        1, len(images),
+        figsize=(fig_w, fig_h),
+        squeeze=False,
+    )
+    for ax, im, label in zip(axes[0], images, labels):
+        ax.imshow(im)
+        ax.axis("off")
+        ax.set_title(label, fontsize=12, pad=8)
+
+    if title:
+        fig.suptitle(title, fontsize=14, y=0.98)
+
+    # Use constrained_layout-friendly approach
+    try:
+        fig.tight_layout(rect=[0, 0, 1, 0.96] if title else [0, 0, 1, 1])
+    except Exception:
+        pass
+
+    fig.savefig(str(out_path), dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [compose] {len(images)} images -> {out_path.name}")
+    return out_path
+
+
+def _composite_all_figures(
+    job_results: list[dict],
+    out_dir: Path,
+) -> None:
+    """
+    For every canonical figure name, gather the per-job PNGs and composite
+    them into a single horizontal-row image saved to ``out_dir`` with the
+    canonical name.
+
+    Per-job figures that don't exist for some jobs are simply skipped
+    (the composite will only include the jobs that produced that figure).
+    """
+    if not job_results:
+        return
+
+    # Union of all canonical figure names that any job might produce.
+    all_fig_names = sorted(
+        set(_CANONICAL_FIGURE_NAMES_D2) | set(_CANONICAL_FIGURE_NAMES_D3)
+    )
+
+    for fig_name in all_fig_names:
+        pairs = []  # list of (path, label)
+        for jr in job_results:
+            p = jr["out_dir"] / f"{fig_name}.png"
+            if p.exists():
+                pairs.append((p, jr["dim_label"]))
+
+        if not pairs:
+            continue
+
+        out_path = out_dir / f"{fig_name}.png"
+        _compose_horizontal(
+            image_paths=[p for p, _ in pairs],
+            labels=[lbl for _, lbl in pairs],
+            out_path=out_path,
+            title=fig_name.replace("_", " ").title(),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +1221,27 @@ def main() -> int:
           f"(duration: {raw.times[-1] - raw.times[0]:.2f} s)")
 
     # -----------------------------------------------------------------
+    # Apply global channel intersection (CD-HSA consistency)
+    # -----------------------------------------------------------------
+    channel_intersection = None
+    if args.channel_intersection is not None:
+        channel_intersection = json.loads(args.channel_intersection)
+        if not isinstance(channel_intersection, list):
+            raise ValueError("--channel-intersection must be a JSON list of channel names")
+        # Validate that all requested channels exist in the raw
+        missing = [ch for ch in channel_intersection if ch not in raw.ch_names]
+        if missing:
+            raise ValueError(
+                f"--channel-intersection references {len(missing)} channels "
+                f"not found in raw: {missing[:5]}{'...' if len(missing) > 5 else ''}"
+            )
+        n_before = len(raw.ch_names)
+        raw.pick(channel_intersection)
+        print(f"  [ChannelIntersection] Applied global intersection: "
+              f"{n_before} -> {len(raw.ch_names)} channels")
+        sys.stdout.flush()
+
+    # -----------------------------------------------------------------
     # PSD of the original (concatenated) EEG channels
     # -----------------------------------------------------------------
     psds_raw, freqs_raw, ch_names, mean_psd, std_psd, raw_psd_path = compute_and_plot_raw_psd(
@@ -629,6 +1315,7 @@ def main() -> int:
             h_freq=args.h_freq,
             n_workers=args.workers,
             verbose=verbose,
+            channel_intersection=channel_intersection,
         )
         sys.stdout.flush()
 
@@ -706,6 +1393,19 @@ def main() -> int:
         except Exception as e:
             print(f"  [WARN] Kernel diagnostics omitido: {e}")
         plot_diffusion_2d_components(meta, out_dir=out_dir)
+        # CD-HSA Specific Modes
+        if stage2_meta.get("dynamics") == "cdhsa_specific_modes":
+            try:
+                from src.plotters.cdhsa_plots import (
+                    plot_cdhsa_eigenvalue_spectrum,
+                    plot_cdhsa_mode_structure,
+                    plot_cdhsa_projection_power,
+                )
+                plot_cdhsa_eigenvalue_spectrum(stage2_meta, out_dir=out_dir)
+                plot_cdhsa_mode_structure(stage2_meta, out_dir=out_dir)
+                plot_cdhsa_projection_power(stage2_meta, Y2=meta["Y"], out_dir=out_dir)
+            except Exception as e:
+                print(f"  [WARN] CD-HSA plots omitidos: {e}")
         print("  [OK] Plots Stage 2 guardados.")
     except Exception as e:
         print(f"  [WARN] Error en plots Stage 2: {e}")
@@ -780,6 +1480,7 @@ def main() -> int:
         data = latent[:, :analysis_dim]
         print(f"\n  Using first {analysis_dim} latent columns for KM analysis")
 
+    # --- Chapman-Kolmogorov test on the FULL data (global, per user choice) ---
     ck_result = chapman_kolmogorov_test(
         data,
         dt=dt,
@@ -801,7 +1502,7 @@ def main() -> int:
     D = analysis_dim
     print(f"  Data shape for KM  : {data.shape}")
 
-    # Plot latent time series
+    # Plot latent time series (all D dims in a single figure, unchanged)
     fig_ts, axes = plt.subplots(D, 1, figsize=(14, 2.5 * D), squeeze=False)
     for d in range(D):
         ax = axes[d, 0]
@@ -837,330 +1538,194 @@ def main() -> int:
     print(f"  Saved latent_timeseries_cleaned.png")
 
     # =====================================================================
-    # 4. CONFIGURATION
+    # 4. CONFIGURATION + HIGH-DIMENSIONAL SPLIT DISPATCH
     # =====================================================================
-    config = CONFIGS['base_2D_model'].copy()
-    config.update({
-        "model_name": (
-            f"testretest_gedai_super_subject_{ss_label}_"
-            f"{args.session}_{args.task}_d{latent_dim}_{spec_label}"
-        ),
-        "D": D,
-        "bins": [args.km_bins] * D,
-        "drift_components": list(range(D)),
-        "diff_components": [(i, i) for i in range(D)],
-        "degree": 2,
-    })
-    print(f"\n  KM config: {config}")
+    # Compute the dimension split.  For D < split_threshold (default 4),
+    # the split returns a single chunk covering all dims -> single job,
+    # identical to the legacy behaviour.
+    jobs = _split_dimensions(D) if D >= args.split_threshold else [list(range(D))]
+    n_jobs_total = len(jobs)
 
-    # =====================================================================
-    # 5. BANDWIDTH OPTIMISATION
-    # =====================================================================
     print("\n" + "=" * 70)
-    print("  STAGE 2: BANDWIDTH OPTIMISATION")
+    print("  STAGE 4: CONFIGURATION + KM JOB DISPATCH")
     print("=" * 70)
+    print(f"  analysis_dim (D)        : {D}")
+    print(f"  split_threshold         : {args.split_threshold}")
+    print(f"  Number of sub-jobs      : {n_jobs_total}")
+    print(f"  Sub-job dim partitions  : "
+          f"{[_dim_label(j) for j in jobs]}")
+    print(f"  Parallel execution      : "
+          f"{n_jobs_total > 1 and not args.no_parallel}")
     sys.stdout.flush()
-    if D < 4:
-        result_bw = optimal_bw(
-            data=data,
-            bins=config["bins"],
-            dt=dt,
-            p=2,
-            kernel="epanechnikov",
-            theoretical=None,
-            sigma_smooth=1.0,
-            n_candidates=30,
-            n_jobs=-1 if D + config["degree"] <= 4 else 1,
-            plot=True,
-            auto_weight=True,
+
+    # Common metadata (used by save_potential)
+    metadata_common = {
+        "super_subject": args.super_subject,
+        "super_subject_label": ss_label,
+        "subject_ids": subject_ids or "auto-resolved",
+        "subjects_per_super_subject": args.subjects_per_super_subject,
+        "subject_start_offset": args.subject_start_offset,
+        "session": args.session,
+        "task": args.task,
+        "t_start": args.t_start,
+        "t_end": args.t_end,
+        "latent_dim": latent_dim,
+        "global_analysis_dim": D,
+        "n_sub_jobs": n_jobs_total,
+        "sub_job_partitions": [_dim_label(j) for j in jobs],
+        "pipeline": spec_label,
+        "pipeline_spec": {k: v for k, v in spec.items()
+                          if k.endswith("params") or k.startswith("stage")},
+        "scoring_method": args.scoring_method,
+    }
+
+    # Ensure plotting style is set (idempotent) so workers don't race
+    # on first-time style setup.
+    try:
+        setup_plotting_style()
+    except Exception:
+        pass
+
+    base_config = CONFIGS['base_2D_model'].copy()
+
+    if n_jobs_total == 1:
+        # ----------------------------------------------------------------
+        # SINGLE JOB: behave exactly as the legacy pipeline.
+        # ----------------------------------------------------------------
+        dim_indices = jobs[0]
+        d_job = len(dim_indices)
+        config = _build_job_config(
+            base_config, d_job, args, latent_dim, ss_label,
+            args.session, args.task, spec_label,
         )
-        bw_opt = result_bw["optimal_bw"]
+        data_job = data[:, dim_indices]
+
+        metadata = dict(metadata_common)
+        metadata["analysis_dim"] = d_job
+        metadata["dim_indices"] = list(dim_indices)
+        metadata["dim_label"] = _dim_label(dim_indices)
+
+        print(f"\n  KM config: {config}")
         sys.stdout.flush()
-        print(f"\n  Optimal bandwidth: {bw_opt:.4f}")
-        print(f"  Drift error: {result_bw['error_drift'][result_bw['optimal_idx']]:.4f}")
-        print(f"  Diffusion error: {result_bw['error_diff'][result_bw['optimal_idx']]:.4f}")
 
-        if "fig" in result_bw:
-            result_bw["fig"].savefig(out_dir / "bw_optimisation.png", dpi=150)
-            plt.close(result_bw["fig"])
-    else:
-        print("  [WARN] Bandwidth optimisation skipped for D >= 4 (computationally expensive).")
-        bw_opt = 0.0002
-
-    # =====================================================================
-    # 6. ESTIMATE KM COEFFICIENTS
-    # =====================================================================
-    print("\n" + "=" * 70)
-    print("  STAGE 3: KM COEFFICIENT ESTIMATION")
-    print("=" * 70)
-
-    drift, diffusion, edges = extract_km_coefficients(
-        data,
-        bins=config["bins"],
-        p=2,
-        bw=bw_opt,
-        kernel="epanechnikov",
-        dt=dt,
-        sigma_smooth=1.0,
-        density_threshold=0.01,
-    )
-
-    print(f"\n  Drift shape    : {drift.shape}")
-    print(f"  Diffusion shape: {diffusion.shape}")
-    print(f"  Bins           : {[len(e) for e in edges]}")
-
-    # =====================================================================
-    # 7. EMPIRICAL DENSITY
-    # =====================================================================
-    print("\n" + "=" * 70)
-    print("  STAGE 4: EMPIRICAL DENSITY")
-    print("=" * 70)
-
-    hist_edges = []
-    for d in range(D):
-        c = edges[d]
-        half = (c[1] - c[0]) / 2.0 if len(c) > 1 else 0.5
-        e = np.concatenate([[c[0] - half], c + half])
-        hist_edges.append(e)
-
-    density, _ = np.histogramdd(data, bins=hist_edges)
-    density = density.astype(float)
-    print(f"  Density shape: {density.shape}")
-
-    # =====================================================================
-    # 8. PLOT KM COMPONENTS
-    # =====================================================================
-    print("\n" + "=" * 70)
-    print("  STAGE 5: PLOT KM COMPONENTS")
-    print("=" * 70)
-
-    figs_km = plot_km_components(
-        drift, diffusion, edges,
-        drift_components=config["drift_components"],
-        diff_components=config["diff_components"],
-        fixed_coords=None,
-        theoretical=None,
-        figsize=(12, 8),
-    )
-    for key, fname in [("drift", "km_components_drift.png"),
-                       ("diffusion", "km_components_diffusion.png")]:
-        fig_km = figs_km.get(key)
-        if fig_km is None:
-            continue
-
-        fig_km.suptitle("...", fontsize=14)
-        fig_km.tight_layout(rect=[0, 0, 1, 0.95])
-        fig_km.savefig(out_dir / fname, dpi=150)
-        plt.close(fig_km)
-    print(f"  Saved km components figures: km_components_drift.png, km_components_diffusion.png")
-
-    # =====================================================================
-    # 9. 1D POTENTIAL RECONSTRUCTION
-    # =====================================================================
-    print("\n" + "=" * 70)
-    print("  STAGE 6: 1D POTENTIAL RECONSTRUCTION (IgA)")
-    print("=" * 70)
-
-    U_rec_1d = reconstruct_potential_1D(
-        drift, diffusion, edges,
-        density=density,
-        degree=config["degree"],
-    )
-
-    fig_pot_1d = plot_potential(
-        U_rec_1d, edges,
-        theoretical=None,
-        component_labels=[f"x{j + 1}" for j in range(D)],
-        figsize=(5 * D, 4),
-    )
-    plt.suptitle(
-        f"{config['model_name'].upper()} -- Reconstructed 1D potential (IgA)"
-    )
-    plt.tight_layout()
-    fig_pot_1d.savefig(out_dir / "potential_1d.png", dpi=150)
-    plt.close(fig_pot_1d)
-    print(f"  Saved potential_1d.png")
-
-    # =====================================================================
-    # 10. FULL MULTIDIMENSIONAL POTENTIAL RECONSTRUCTION
-    # =====================================================================
-    print("\n" + "=" * 70)
-    print("  STAGE 7: FULL MULTIDIMENSIONAL POTENTIAL (IgA)")
-    print("=" * 70)
-
-    result_iga = reconstruct_potential(
-        drift, diffusion, edges,
-        density=density,
-        method="iga",
-        return_full=True,
-        degree=config["degree"],
-        decompose_helmholtz=True,
-        density_threshold=0.01,
-        rtol=1e-6,
-        atol=1e-12,
-        compute_stream_function=True,
-    )
-
-    U_rec = result_iga["potential"]
-    print(f"\n  Reconstructed potential shape: {U_rec.shape}")
-    print(f"  Method: Galerkin-B-spline (degree={config['degree']})")
-
-    # Quality metrics
-    rank_D = result_iga["rank_D"]
-    condition_D = result_iga["condition_D"]
-    frac_low_rank = np.mean(rank_D < D) if np.any(~np.isnan(rank_D)) else 0.0
-    print(f"  Fraction cells with rank_D < {D}: {frac_low_rank:.2%}")
-    print(f"  Condition D (median): {np.nanmedian(condition_D):.2e}")
-    print(f"  Condition D (max)   : {np.nanmax(condition_D):.2e}")
-
-    # Helmholtz metrics
-    if "eta" in result_iga:
-        eta = result_iga["eta"]
-        is_eq = result_iga["is_equilibrium"]
-        print(f"  Non-equilibrium metric eta: {eta:.4f}")
-        print(f"  Detailed balance? {is_eq} (threshold eta < 0.1)")
-
-    # =====================================================================
-    # 10b. GUARDAR DATOS DEL POTENCIAL PARA POST-PROCESAMIENTO
-    # =====================================================================
-    if save_potential_flag:
-        print("\n" + "-" * 50)
-        print("  SAVING POTENTIAL DATA FOR POST-PROCESSING")
-        print("-" * 50)
-
-        metadata = {
-            "super_subject": args.super_subject,
-            "super_subject_label": ss_label,
-            "subject_ids": subject_ids or "auto-resolved",
-            "subjects_per_super_subject": args.subjects_per_super_subject,
-            "subject_start_offset": args.subject_start_offset,
-            "session": args.session,
-            "task": args.task,
-            "t_start": args.t_start,
-            "t_end": args.t_end,
-            "latent_dim": latent_dim,
-            "analysis_dim": D,
-            "pipeline": spec_label,
-            "pipeline_spec": {k: v for k, v in spec.items() if k.endswith("params") or k.startswith("stage")},
-            "scoring_method": args.scoring_method,
-        }
-
-        potential_path = save_potential(
-            result_iga=result_iga,
-            edges=edges,
-            density=density,
+        _run_km_job(
+            data=data_job,
+            dt=dt,
             config=config,
+            dim_indices=dim_indices,
+            dim_label=_dim_label(dim_indices),
             out_dir=out_dir,
+            save_potential_flag=save_potential_flag,
             metadata=metadata,
-            filename="potential_data.npz",
+            save_potential_filename="potential_data.npz",
         )
-        print(f"  Potential data saved: {potential_path}")
-
-    # =====================================================================
-    # 11. PLOT POTENCIAL 2D / SLICES (D >= 2)
-    # =====================================================================
-    print("\n" + "=" * 70)
-    print("  STAGE 8: PLOT POTENCIAL 2D / SLICES")
-    print("=" * 70)
-
-    if D == 2:
-        fig_pot_2d = plot_potential_2d(
-            U_rec, edges,
-            title_est=f"{config['model_name'].upper()} -- Reconstructed",
-            figsize=(12, 5),
-            unify_colorbar=True,
-            align_minima=True,
-            align_to_zero=True,
-            crop_to_valid=True,
-            show_streamlines=False,
-            stream_function=result_iga.get('stream_function'),
-            reconstructed_field=result_iga.get('reconstructed_field'),
-        )
-        if fig_pot_2d is None:
-            fig_pot_2d = plt.gcf()
-        fig_pot_2d.savefig(out_dir / "potential_2d.png", dpi=150)
-        plt.close(fig_pot_2d)
-        print("  Saved potential_2d.png")
-
-        fig_pot_2d = plot_potential_2d(
-            U_rec, edges,
-            title_est=f"{config['model_name'].upper()} -- Reconstructed",
-            figsize=(12, 5),
-            unify_colorbar=True,
-            align_minima=True,
-            align_to_zero=True,
-            crop_to_valid=True,
-            stream_function=result_iga.get('stream_function'),
-            reconstructed_field=result_iga.get('reconstructed_field'),
-        )
-        if fig_pot_2d is None:
-            fig_pot_2d = plt.gcf()
-        fig_pot_2d.savefig(out_dir / "potential_2d_streamlines.png", dpi=150)
-        plt.close(fig_pot_2d)
-        print("  Saved potential_2d_streamlines.png")
-
-        if "residual" in result_iga:
-            residual = result_iga["residual"]
-            r_norm = np.sqrt(np.nansum(residual**2, axis=0))
-            x_c, y_c = edges
-            X, Y = np.meshgrid(x_c, y_c, indexing="ij")
-            fig_res = plt.figure(figsize=(6, 5))
-            plt.contourf(X, Y, np.nan_to_num(r_norm, nan=0), levels=20, cmap="magma")
-            plt.colorbar(label="||r||")
-            plt.xlabel("x")
-            plt.ylabel("y")
-            plt.title(f"Residuo Helmholtz (no-equilibrio) -- {config['model_name'].upper()}")
-            plt.axis("equal")
-            plt.tight_layout()
-            fig_res.savefig(out_dir / "potential_2d_residual.png", dpi=150)
-            plt.close(fig_res)
-            print("  Saved potential_2d_residual.png")
-
-        if result_iga.get('nonconservative_force') is not None:
-            fig_v = plot_nonconservative_force_2d(
-                result_iga['nonconservative_force'], edges,
-                title=f"Fuerza no-conservativa v = f + D grad U -- {config['model_name'].upper()}",
-                crop_to_valid=True,
-            )
-            fig_v.savefig(out_dir / "potential_2d_nonconservative_force.png", dpi=150)
-            plt.close(fig_v)
-            print("  Saved potential_2d_nonconservative_force.png")
-
-        if (result_iga.get('reconstructed_field') is not None
-                or result_iga.get('nonconservative_force') is not None):
-            fig_comb = plot_potential_combined_2d(
-                U_rec, edges,
-                stream_function=result_iga.get('stream_function'),
-                nonconservative_force=result_iga.get('nonconservative_force'),
-                reconstructed_field=result_iga.get('reconstructed_field'),
-                title=f"{config['model_name'].upper()} -- U (fondo) + v (flechas rojas) + streamlines (blanco)",
-                crop_to_valid=True,
-            )
-            fig_comb.savefig(out_dir / "potential_2d_combined.png", dpi=150)
-            plt.close(fig_comb)
-            print("  Saved potential_2d_combined.png")
-
-    elif D >= 3:
-        dim_pairs = [(i, j) for i in range(min(D, 3)) for j in range(i + 1, min(D, 3))]
-        for dims in dim_pairs:
-            fig_slice = plot_potential_slice(
-                U_rec, edges, dims=dims,
-                fixed_coords={d: 0.0 for d in range(D) if d not in dims},
-                title=f"{config['model_name'].upper()} -- Reconstructed (slice x{dims[0]+1}-x{dims[1]+1})",
-                figsize=(12, 5),
-                unify_colorbar=True,
-                align_minima=True,
-                align_to_zero=True,
-                crop_to_valid=True,
-            )
-            if fig_slice is None:
-                fig_slice = plt.gcf()
-            fname = f"potential_slice_x{dims[0]+1}_x{dims[1]+1}.png"
-            fig_slice.savefig(out_dir / fname, dpi=150)
-            plt.close(fig_slice)
-            print(f"  Saved {fname}")
     else:
-        print("  (Skipping 2D/slice plots for D=1)")
+        # ----------------------------------------------------------------
+        # MULTIPLE JOBS: dispatch in parallel, then composite figures.
+        # ----------------------------------------------------------------
+        per_job_root = out_dir / "_per_job"
+        if per_job_root.exists():
+            shutil.rmtree(per_job_root, ignore_errors=True)
+        per_job_root.mkdir(parents=True, exist_ok=True)
+
+        # Build per-job spec dicts (do this in the main thread so the
+        # workers receive plain args, no closures).
+        job_specs = []
+        for i, dim_indices in enumerate(jobs):
+            d_job = len(dim_indices)
+            config = _build_job_config(
+                base_config, d_job, args, latent_dim, ss_label,
+                args.session, args.task, spec_label,
+            )
+            data_job = data[:, dim_indices].copy()   # copy -> contiguous,
+                                                     # avoid false sharing
+            dim_label = _dim_label(dim_indices)
+            job_out_dir = per_job_root / f"job_{i:02d}_{dim_label}"
+            job_out_dir.mkdir(parents=True, exist_ok=True)
+
+            metadata = dict(metadata_common)
+            metadata["analysis_dim"] = d_job
+            metadata["dim_indices"] = list(dim_indices)
+            metadata["dim_label"] = dim_label
+
+            save_potential_filename = f"potential_data_{dim_label}.npz"
+
+            job_specs.append({
+                "data": data_job,
+                "dt": dt,
+                "config": config,
+                "dim_indices": list(dim_indices),
+                "dim_label": dim_label,
+                "out_dir": job_out_dir,
+                "save_potential_flag": save_potential_flag,
+                "metadata": metadata,
+                "save_potential_filename": save_potential_filename,
+            })
+
+        print(f"\n  Dispatching {len(job_specs)} sub-jobs "
+              f"(parallel={not args.no_parallel}) ...")
+        sys.stdout.flush()
+
+        if args.no_parallel or len(job_specs) == 1:
+            # Sequential
+            job_results = []
+            for js in job_specs:
+                job_results.append(_run_km_job(**js))
+        else:
+            # Parallel via joblib PROCESSES (not threads).
+            #
+            # We MUST use processes, not threads, because matplotlib's
+            # mathtext parser (used by bw_optimization.py labels like
+            # r'$\eta_{\rm DB}$ (dimensionless)') relies on module-level
+            # mutable state that is NOT thread-safe.  Concurrent calls
+            # to fig.tight_layout() from multiple threads corrupt the
+            # parser and raise:
+            #   ValueError: Expected end of text, found '$'
+            #
+            # Processes give each worker its own matplotlib state.
+            # Numpy arrays in job_specs are small (~10 MB each for
+            # 600k x 2 floats) so pickling overhead is negligible.
+            try:
+                from joblib import Parallel, delayed
+            except ImportError:
+                print("  [WARN] joblib not available; falling back to sequential.")
+                job_results = [_run_km_job(**js) for js in job_specs]
+            else:
+                # n_jobs=-1 -> use all CPUs.  prefer="processes" forces
+                # process-based parallelism even on non-POSIX systems.
+                # max_nbytes=None keeps arrays in memory (no memmap disk
+                # spill), which is fine for our sizes.
+                job_results = Parallel(
+                    n_jobs=-1, backend="loky", verbose=0,
+                )(
+                    delayed(_run_km_job)(**js) for js in job_specs
+                )
+
+        # ----------------------------------------------------------------
+        # MOVE per-job potential_data files into the canonical out_dir.
+        # ----------------------------------------------------------------
+        if save_potential_flag:
+            print("\n  Moving per-job potential_data files to out_dir ...")
+            for jr in job_results:
+                src = jr["out_dir"] / jr["save_potential_filename"]
+                if src.exists():
+                    dst = out_dir / jr["save_potential_filename"]
+                    shutil.move(str(src), str(dst))
+                    print(f"    {jr['dim_label']}: {dst.name}")
+
+        # ----------------------------------------------------------------
+        # COMPOSITE per-job figures into canonical single-row PNGs.
+        # ----------------------------------------------------------------
+        print("\n  Compositing per-job figures into canonical single-row PNGs ...")
+        sys.stdout.flush()
+        _composite_all_figures(job_results, out_dir)
+
+        # ----------------------------------------------------------------
+        # CLEANUP per-job temp dir (only per-job figures; potential_data
+        # was already moved out).
+        # ----------------------------------------------------------------
+        shutil.rmtree(per_job_root, ignore_errors=True)
+        print("  [OK] Per-job temp dir cleaned up.")
 
     # =====================================================================
     # 12. SUMMARY
@@ -1191,10 +1756,18 @@ def main() -> int:
     print(f"  Pipeline            : {spec_label} (hash {spec_hash})")
     print(f"  Per-subject window  : {args.t_start:.1f}s -> {args.t_end:.1f}s")
     print(f"  Concatenated length : {raw.times[-1] - raw.times[0]:.1f} s")
+    print(f"  Analysis dim (D)    : {D}")
+    print(f"  Sub-jobs            : {n_jobs_total} "
+          f"({_dim_label(jobs[0]) if jobs else 'n/a'}"
+          f"{', ...' if n_jobs_total > 1 else ''})")
     print(f"  Total wall-clock    : {total_time:.1f} s")
     print(f"  Output saved to     : {out_dir.absolute()}")
     if save_potential_flag:
-        print(f"  Potential data      : {out_dir / 'potential_data.npz'}")
+        if n_jobs_total == 1:
+            print(f"  Potential data      : {out_dir / 'potential_data.npz'}")
+        else:
+            print(f"  Potential data      : {out_dir} / potential_data_dim*.npz "
+                  f"({n_jobs_total} files)")
 
     return 0
 

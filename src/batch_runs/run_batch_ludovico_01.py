@@ -229,6 +229,34 @@ class Ludovico01BatchRunner:
         self.output_dir = Path(BASE_RESULTS_PATH)
         self.cache_dir = Path(BASE_CACHE_PATH)
 
+        # mode_map path for cdhsa_specific_modes
+        self.mode_map_path: str | None = params.get("mode_map_path")
+        if self.mode_map_path is not None:
+            logger.info("  mode_map_path     : %s", self.mode_map_path)
+
+        # Detectar si algun metodo usa cdhsa_specific_modes
+        self._has_cdhsa_method = any(
+            m["stage2_dynamics"] == "cdhsa_specific_modes"
+            for m in params["methods"]
+        )
+        if self._has_cdhsa_method and self.mode_map_path is None:
+            # Intentar resolver desde BASE_PARAMS_FILE / params
+            try:
+                from src.utils.config import BASE_PARAMS_FILE
+                params_dir = Path(BASE_PARAMS_FILE)
+                candidates = list(params_dir.glob("mode_map_*_ludovico_01_*.json"))
+                if candidates:
+                    self.mode_map_path = str(max(candidates, key=lambda p: p.stat().st_mtime))
+                    logger.info("  mode_map_path     : %s (auto-resolved)", self.mode_map_path)
+            except (ImportError, AttributeError):
+                pass
+
+        if self._has_cdhsa_method and self.mode_map_path is None:
+            logger.warning(
+                "  [WARN] Methods use cdhsa_specific_modes but no mode_map_path "
+                "resolved. Pass 'mode_map_path' in JSON or --mode-map-path in CLI."
+            )
+
         # Ejecucion
         self.delay: float = self.exec_cfg.get("delay", 2.0)
         self.max_workers: int = self.exec_cfg.get("max_workers", DEFAULT_BATCH_RUNS_WORKERS)
@@ -292,6 +320,10 @@ class Ludovico01BatchRunner:
         logger.info("  Max workers : %d (%s)",
                     self.max_workers, "paralelo" if self.max_workers > 1 else "secuencial")
         logger.info("  Post-process: %s", self.run_postprocess)
+        if self.mode_map_path:
+            logger.info("  mode_map    : %s", self.mode_map_path)
+        if self._has_cdhsa_method:
+            logger.info("  CDHSA modes : YES (cdhsa_specific_modes)")
         logger.info("=" * 70)
 
     # ------------------------------------------------------------------
@@ -459,6 +491,15 @@ class Ludovico01BatchRunner:
         # --- Stage 2: Dynamics ---
         cmd.extend(["--stage2-dynamics", method["stage2_dynamics"]])
         s2_params = method.get("stage2_params", {})
+
+        # For cdhsa_specific_modes, inject mode_map_path and condition
+        if method["stage2_dynamics"] == "cdhsa_specific_modes":
+            if self.mode_map_path is not None:
+                cmd.extend(["--mode-map-path", self.mode_map_path])
+            # condition = subject name (auto-injected by pipeline, but explicit is safer)
+            condition_name = s2_params.get("condition", job["subject"])
+            cmd.extend(["--condition", condition_name])
+
         if s2_params:
             cmd.extend(["--stage2-params", json.dumps(s2_params)])
 
@@ -945,6 +986,14 @@ def main() -> int:
             f"Default: {DEFAULT_PARAMS_JSON}"
         ),
     )
+    parser.add_argument(
+        "--mode-map-path", type=str, default=None,
+        help=(
+            "Ruta al mode_map.json generado por el batch CDHSA de Ludovico. "
+            "Se usa cuando algun metodo tiene stage2_dynamics='cdhsa_specific_modes'. "
+            "Si no se pasa, se intenta auto-resolver desde BASE_PARAMS_FILE/params."
+        ),
+    )
     args = parser.parse_args()
 
     # Determinar ruta del JSON
@@ -955,6 +1004,10 @@ def main() -> int:
     # Cargar parametros
     params = _load_params(json_path)
     logger.info("Parametros cargados desde: %s", json_path)
+
+    # CLI override para mode_map_path
+    if args.mode_map_path:
+        params["mode_map_path"] = args.mode_map_path
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

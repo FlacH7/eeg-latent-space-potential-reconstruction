@@ -191,7 +191,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--stage1-params", type=str, default=None,
                         help='JSON dict of Stage-1 params, e.g. \'{"depth": 250}\'')
     parser.add_argument("--stage2-dynamics", type=str, default=None,
-                        choices=["pca_ica", "pca", "dmd", "diffusion_maps"],
+                        choices=["pca_ica", "pca", "dmd", "diffusion_maps", "cdhsa_specific_modes"],
                         help="Stage 2 dynamics (new API).")
     parser.add_argument("--stage2-params", type=str, default=None,
                         help='JSON dict of Stage-2 params, e.g. \'{"svd_rank": 50}\'')
@@ -255,6 +255,13 @@ def _parse_args() -> argparse.Namespace:
                         help="Guardar datos del potencial en .npz para post-procesamiento")
     parser.add_argument("--no-save-potential", action="store_true",
                         help="Deshabilitar el guardado del potencial")
+    # ---- CD-HSA specific modes ----
+    parser.add_argument("--mode-map-path", type=str, default=None,
+                        help="Path to mode_map.json (from CDHSA batch runner). "
+                             "Required when stage2-dynamics=cdhsa_specific_modes.")
+    parser.add_argument("--condition", type=str, default=None,
+                        help="Condition name to extract from mode_map.json "
+                             "(e.g. 'data_01_23_18'). Required for cdhsa_specific_modes.")
     parser.add_argument("--verbose", action="store_true", default=True)
 
     return parser.parse_args()
@@ -309,6 +316,16 @@ def _resolve_pipeline_spec(args: argparse.Namespace) -> dict:
         p1 = _json_params(args.stage1_params)
         p2 = _json_params(args.stage2_params)
         p3 = _json_params(args.stage3_params)
+
+        if s2 == "cdhsa_specific_modes":
+            # Auto-inject --condition (the subject name IS the condition)
+            if args.condition is None:
+                args.condition = args.subject
+                print(f"  [Ludovico01] Auto-injecting condition='{args.condition}' "
+                      f"(from --subject) for cdhsa_specific_modes")
+            p2.setdefault("condition", args.condition)
+            if args.mode_map_path is not None:
+                p2.setdefault("mode_map_path", args.mode_map_path)
 
         # Inject CLI convenience flags when not overridden in the JSON
         if s1 == "hankel":
@@ -863,7 +880,7 @@ def main() -> int:
         drift, diffusion, edges, density=density,
         method="iga", return_full=True, degree=config["degree"],
         decompose_helmholtz=True, density_threshold=0.01,
-        rtol=1e-6, atol=1e-12, compute_stream_function=True,
+        rtol=5e-2, atol=1e-12, compute_stream_function=True,
     )
 
     U_rec = result_iga["potential"]
@@ -946,7 +963,7 @@ def main() -> int:
             align_minima=True, align_to_zero=True,
             crop_to_valid=True,
             stream_function=result_iga.get('stream_function'),
-            reconstructed_field=result_iga.get('reconstructed_field'),
+            reconstructed_field=result_iga.get('reconstructed_drift'),
         )
         if fig_pot_2d is None:
             fig_pot_2d = plt.gcf()
@@ -990,7 +1007,7 @@ def main() -> int:
                 U_rec, edges,
                 stream_function=result_iga.get('stream_function'),
                 nonconservative_force=result_iga.get('nonconservative_force'),
-                reconstructed_field=result_iga.get('reconstructed_field'),
+                reconstructed_field=result_iga.get('reconstructed_drift'),
                 title=f"{config['model_name'].upper()} — U (fondo) + v (flechas rojas) + streamlines (blanco)",
                 crop_to_valid=True,
             )
