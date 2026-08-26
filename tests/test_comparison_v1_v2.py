@@ -74,38 +74,38 @@ sys.modules['src'] = _src
 sys.modules['src.cdhsa'] = _src_cdhsa
 
 # Pre-import and register the modules that v1 code references via src.cdhsa
-import src.cdhsa.a_common_subspace as _acs_mod
-sys.modules['src.cdhsa.a_common_subspace'] = _acs_mod
+# import src.cdhsa.a_common_subspace as _acs_mod
+# sys.modules['src.cdhsa.a_common_subspace'] = _acs_mod
 
-import src.cdhsa.permutation_tests as _pt_mod
-sys.modules['src.cdhsa.permutation_tests'] = _pt_mod
+# import src.cdhsa.permutation_tests as _pt_mod
+# sys.modules['src.cdhsa.permutation_tests'] = _pt_mod
 
 # =====================================================================
 # Now validate that all required modules are importable.
 # =====================================================================
-_REQUIRED_MODS = [
-    'a_common_subspace', 'a_common_subspace_v2',
-    'b_energy', 'b_energy_v2',
-    'd_condition_specific', 'd_condition_specific_v2',
-    'permutation_tests',
-]
-_missing = []
-for _mod in _REQUIRED_MODS:
-    try:
-        __import__(_mod)
-    except ImportError as _e:
-        _missing.append(f"{_mod} ({_e})")
-if _missing:
-    print(f"ERROR: The following modules could not be imported:")
-    for _m in _missing:
-        print(f"  - {_m}")
-    print(f"")
-    print(f"sys.path (first 5): {sys.path[:5]}")
-    print(f"")
-    print(f"SOLUTION: copy ALL .py files to the same directory as this script,")
-    print(f"or set PYTHONPATH to the directory containing them:")
-    print(f"  PYTHONPATH=/path/to/modules python {Path(__file__).name}")
-    sys.exit(1)
+# _REQUIRED_MODS = [
+#     'src.cdhsa.a_common_subspace', 'src.cdhsa.a_common_subspace_v2',
+#     'src.cdhsa.b_energy', 'src.cdhsa.b_energy_v2',
+#     'src.cdhsa.d_condition_specific', 'src.cdhsa.d_condition_specific_v2',
+#     'src.cdhsa.permutation_tests',
+# ]
+# _missing = []
+# for _mod in _REQUIRED_MODS:
+#     try:
+#         __import__(_mod)
+#     except ImportError as _e:
+#         _missing.append(f"{_mod} ({_e})")
+# if _missing:
+#     print(f"ERROR: The following modules could not be imported:")
+#     for _m in _missing:
+#         print(f"  - {_m}")
+#     print(f"")
+#     print(f"sys.path (first 5): {sys.path[:5]}")
+#     print(f"")
+#     print(f"SOLUTION: copy ALL .py files to the same directory as this script,")
+#     print(f"or set PYTHONPATH to the directory containing them:")
+#     print(f"  PYTHONPATH=/path/to/modules python {Path(__file__).name}")
+#     sys.exit(1)
 
 # ---- Import v1 (original) modules ----
 from src.cdhsa.a_common_subspace import (
