@@ -53,9 +53,11 @@ from numpy.typing import NDArray
 # Path setup: add the directory containing this script to sys.path.
 # All v1/v2 .py files must be importable (same dir or via PYTHONPATH).
 # =====================================================================
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 
 # =====================================================================
 # Register src.cdhsa stubs BEFORE importing v1 modules.
@@ -67,7 +69,7 @@ import types as _types
 _src = _types.ModuleType('src')
 _src_cdhsa = _types.ModuleType('src.cdhsa')
 _src.cdhsa = _src_cdhsa
-_src_cdhsa.__path__ = [str(SCRIPT_DIR)]
+_src_cdhsa.__path__ = [str(_SCRIPT_DIR)]
 sys.modules['src'] = _src
 sys.modules['src.cdhsa'] = _src_cdhsa
 
