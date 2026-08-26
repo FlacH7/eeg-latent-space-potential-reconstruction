@@ -50,62 +50,42 @@ import numpy as np
 from numpy.typing import NDArray
 
 # =====================================================================
-# Path setup: add the directory containing this script to sys.path.
-# All v1/v2 .py files must be importable (same dir or via PYTHONPATH).
+# Path setup: add the repo root to sys.path so that 'src.cdhsa.xxx'
+# resolves to the real files under src/cdhsa/.
 # =====================================================================
-_SCRIPT_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _SCRIPT_DIR.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-
-# =====================================================================
-# Register src.cdhsa stubs BEFORE importing v1 modules.
-# The v1 originals import from "src.cdhsa.xxx" which doesn't exist
-# in a flat directory layout.  We create lightweight module stubs so
-# those imports resolve to the flat modules.
-# =====================================================================
-import types as _types
-_src = _types.ModuleType('src')
-_src_cdhsa = _types.ModuleType('src.cdhsa')
-_src.cdhsa = _src_cdhsa
-_src_cdhsa.__path__ = [str(_SCRIPT_DIR)]
-sys.modules['src'] = _src
-sys.modules['src.cdhsa'] = _src_cdhsa
-
-# Pre-import and register the modules that v1 code references via src.cdhsa
-# import src.cdhsa.a_common_subspace as _acs_mod
-# sys.modules['src.cdhsa.a_common_subspace'] = _acs_mod
-
-# import src.cdhsa.permutation_tests as _pt_mod
-# sys.modules['src.cdhsa.permutation_tests'] = _pt_mod
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent.parent   # ajusta si tu anidación es distinta
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # =====================================================================
-# Now validate that all required modules are importable.
+# Validate that all required modules are importable.
 # =====================================================================
-# _REQUIRED_MODS = [
-#     'src.cdhsa.a_common_subspace', 'src.cdhsa.a_common_subspace_v2',
-#     'src.cdhsa.b_energy', 'src.cdhsa.b_energy_v2',
-#     'src.cdhsa.d_condition_specific', 'src.cdhsa.d_condition_specific_v2',
-#     'src.cdhsa.permutation_tests',
-# ]
-# _missing = []
-# for _mod in _REQUIRED_MODS:
-#     try:
-#         __import__(_mod)
-#     except ImportError as _e:
-#         _missing.append(f"{_mod} ({_e})")
-# if _missing:
-#     print(f"ERROR: The following modules could not be imported:")
-#     for _m in _missing:
-#         print(f"  - {_m}")
-#     print(f"")
-#     print(f"sys.path (first 5): {sys.path[:5]}")
-#     print(f"")
-#     print(f"SOLUTION: copy ALL .py files to the same directory as this script,")
-#     print(f"or set PYTHONPATH to the directory containing them:")
-#     print(f"  PYTHONPATH=/path/to/modules python {Path(__file__).name}")
-#     sys.exit(1)
+_REQUIRED_MODS = [
+    'src.cdhsa.a_common_subspace',
+    'src.cdhsa.a_common_subspace_v2',
+    'src.cdhsa.b_energy',
+    'src.cdhsa.b_energy_v2',
+    'src.cdhsa.d_condition_specific',
+    'src.cdhsa.d_condition_specific_v2',
+    'src.cdhsa.permutation_tests',
+]
+_missing = []
+for _mod in _REQUIRED_MODS:
+    try:
+        __import__(_mod)
+    except ImportError as _e:
+        _missing.append(f"{_mod} ({_e})")
+if _missing:
+    print(f"ERROR: The following modules could not be imported:")
+    for _m in _missing:
+        print(f"  - {_m}")
+    print(f"")
+    print(f"sys.path (first 5): {sys.path[:5]}")
+    print(f"")
+    print(f"SOLUTION: ensure the repo root is on PYTHONPATH:")
+    print(f"  PYTHONPATH={REPO_ROOT} python {Path(__file__).name}")
+    sys.exit(1)
 
 # ---- Import v1 (original) modules ----
 from src.cdhsa.a_common_subspace import (
@@ -131,7 +111,6 @@ from src.cdhsa.b_energy_v2 import (
 from src.cdhsa.d_condition_specific_v2 import (
     cdhsa_D_condition_specific_modes as cdhsa_D_v2,
 )
-
 
 # =====================================================================
 # Synthetic data generator
