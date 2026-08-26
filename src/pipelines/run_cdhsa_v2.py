@@ -3,7 +3,7 @@ src.pipelines.run_cdhsa_v2 - Memory-Optimized CD-HSA Orchestrator
 ================================================================
 
 Same pipeline as run_cdhsa.py but uses the _v2 modules that avoid
-materializing the block-Hankel matrix.  The two changes are:
+materializing the block-Hankel matrix.  The changes are:
 
   1. cdhsa_A1_A5  →  cdhsa_A1_A5 from a_common_subspace_v2.py
      (LinearOperator + svds, H never materialized)
@@ -13,18 +13,30 @@ materializing the block-Hankel matrix.  The two changes are:
      (removed dead import of build_block_hankel; algorithm unchanged
       since D operates only on small U/W0 matrices)
 
-Expected memory reduction: from ~97 GB peak to ~13-15 GB peak
+Expected memory reduction: from ~97 GB peak to ~2-5 GB peak
 (with the same parameters that produced 97 GB before).
+
+Usage (CLI — drop-in replacement for run_cdhsa.py)::
+
+    python -m src.pipelines.run_cdhsa_v2 \\
+        --session session1 \\
+        --tasks eyesclosed music \\
+        --n-super-subjects 5 \\
+        --total-subjects 60 \\
+        --t-start 100 --t-end 200 \\
+        --L 10 --hankel-depth 10 \\
+        --fixed-rank 15 --a6-n-null 500 --bc-n-perm 5000
 
 Usage (programmatic)::
 
-    from run_cdhsa_v2 import run_cdhsa_v2, CDHSAConfig
+    from src.pipelines.run_cdhsa_v2 import run_cdhsa_v2, CDHSAConfig
     cfg = CDHSAConfig(fixed_rank=10, a6_n_null=100, bc_n_perm=5000)
     result = run_cdhsa_v2(X, L, cfg)
     print(result.summary())
 
-The API is 100% compatible with run_cdhsa().  Only the internal
-implementation of steps A1-A5 and B/C changes.
+The CLI is a 100% drop-in replacement for run_cdhsa.py.  The batch
+runner (run_batch_cdhsa.py) can point to this module via
+--pipeline-script or by changing pipeline_module.
 """
 
 from __future__ import annotations
@@ -191,9 +203,158 @@ def run_cdhsa_v2(
 
 
 # =====================================================================
-# Standalone run (for quick testing without the full project)
+# CLI — drop-in replacement for run_cdhsa.py
+# =====================================================================
+# Import CLI helpers from the original module.  The only difference is
+# that we call run_cdhsa_v2() instead of run_cdhsa() for step 3.
 # =====================================================================
 
+try:
+    from src.pipelines.run_cdhsa import (
+        _parse_args as _orig_parse_args,
+        _resolve_out_dir as _orig_resolve_out_dir,
+        save_results as _orig_save_results,
+        build_hankel_from_eeg,
+        build_hankel_single_ss,
+        characterize_hankel_matrices,
+    )
+    _HAS_CLI = True
+except ImportError:
+    _HAS_CLI = False
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point — identical to run_cdhsa.main() but uses v2 pipeline.
+
+    This function is a drop-in replacement.  It reuses all the
+    data-loading, argument-parsing, and result-saving logic from the
+    original ``run_cdhsa`` module.  The ONLY change is that step 3
+    calls ``run_cdhsa_v2()`` instead of ``run_cdhsa()``.
+    """
+    if not _HAS_CLI:
+        print("ERROR: Cannot import CLI helpers from run_cdhsa.", file=sys.stderr)
+        print("Make sure run_cdhsa.py is importable.", file=sys.stderr)
+        return 1
+
+    args = _orig_parse_args(argv)
+    verbose = "INFO" if args.verbose else None
+
+    # 0. Resolve output directory
+    if not args.no_save:
+        out_dir = _orig_resolve_out_dir(args)
+    else:
+        out_dir = None
+
+    # 1. Build Hankel matrices (same as original)
+    single_mode = args.super_subject_id is not None
+
+    if single_mode:
+        print("=" * 70)
+        print("  CONSTRUYENDO MATRICES DE HANKEL (SINGLE SUPER-SUBJECT)")
+        print("=" * 70)
+
+        X, hankel_info = build_hankel_single_ss(
+            super_subject_id=args.super_subject_id,
+            session=args.session,
+            tasks=args.tasks,
+            subjects_per_super_subject=args.subjects_per_super_subject,
+            subject_start_offset=args.subject_start_offset,
+            db_path=args.db_path,
+            t_start=args.t_start,
+            t_stop=args.t_end,
+            l_freq=args.l_freq,
+            h_freq=args.h_freq,
+            hankel_depth=args.hankel_depth,
+            verbose=verbose,
+        )
+    else:
+        print("=" * 70)
+        print("  CONSTRUYENDO MATRICES DE HANKEL DESDE SUPER-SUJETOS")
+        print("=" * 70)
+
+        X, hankel_info = build_hankel_from_eeg(
+            session=args.session,
+            tasks=args.tasks,
+            n_super_subjects=args.n_super_subjects,
+            total_subjects=args.total_subjects,
+            subject_start_offset=args.subject_start_offset,
+            db_path=args.db_path,
+            t_start=args.t_start,
+            t_stop=args.t_end,
+            l_freq=args.l_freq,
+            h_freq=args.h_freq,
+            hankel_depth=args.hankel_depth,
+            verbose=verbose,
+        )
+
+    # 2. Characterize (same as original)
+    characterization = characterize_hankel_matrices(X, hankel_info)
+    print(characterization)
+
+    n_valid = sum(
+        1 for s in range(len(X)) for c in range(len(X[s]))
+        if X[s][c].size > 0
+    )
+    if n_valid == 0:
+        print("\n[ERROR] No se construyeron matrices validas.")
+        return 1
+
+    # 3. Configure and run CD-HSA (v2!)
+    cfg = CDHSAConfig(
+        fixed_rank=args.fixed_rank,
+        rank_method=args.rank_method,
+        a6_n_null=args.a6_n_null,
+        bc_n_perm=args.bc_n_perm,
+        bc_condition_names=list(args.tasks),
+        d_max_specific=args.d_max_specific,
+        skip_bc=args.skip_bc,
+        skip_tangent=args.skip_tangent,
+        skip_d=args.skip_d,
+    )
+
+    S = len(X)
+    print("\n" + "=" * 70)
+    print("  EJECUTANDO CD-HSA (v2: memory-optimized)")
+    print("=" * 70)
+    print(f"  Modo                  : {'single-SS' if single_mode else 'multi-SS'}")
+    if single_mode:
+        print(f"  Super-sujeto ID        : {args.super_subject_id}")
+        print(f"  Subjects por SS       : {args.subjects_per_super_subject}")
+    else:
+        print(f"  Super-sujetos (S)     : {args.n_super_subjects}")
+        print(f"  Subjects por SS       : {args.total_subjects // args.n_super_subjects}")
+    print(f"  S (matrices)          : {S}")
+    print(f"  Condiciones (C)       : {len(args.tasks)}")
+    print(f"  L (subespacio)        : {args.L}")
+    print(f"  fixed_rank            : {cfg.fixed_rank}")
+    print(f"  a6_n_null             : {cfg.a6_n_null}")
+    print(f"  bc_n_perm             : {cfg.bc_n_perm}")
+    if out_dir is not None:
+        print(f"  Out dir               : {out_dir}")
+    print("")
+    sys.stdout.flush()
+
+    # >>> THIS IS THE ONLY LINE THAT DIFFERS FROM run_cdhsa.py <<<
+    result = run_cdhsa_v2(X, args.L, cfg)
+
+    # 4. Results
+    print("")
+    print(result.summary())
+
+    # 5. Save (same as original)
+    if out_dir is not None:
+        _orig_save_results(
+            out_dir=out_dir,
+            X=X,
+            hankel_info=hankel_info,
+            characterization=characterization,
+            result=result,
+            cfg=cfg,
+            L=args.L,
+        )
+
+    return 0
+
+
 if __name__ == "__main__":
-    print("run_cdhsa_v2.py is a library module. Use run_cdhsa.py CLI with v2 imports,")
-    print("or call run_cdhsa_v2(X, L, config) programmatically.")
+    sys.exit(main())
