@@ -24,7 +24,7 @@
     "hankel_depth": 10,
     "l_freq": 1.0,
     "h_freq": 40.0,
-    "fixed_rank": 15,
+    "fixed_rank": 20,
     "rank_method": "fixed",
     "a6_n_null": 500,
     "bc_n_perm": 5000,
