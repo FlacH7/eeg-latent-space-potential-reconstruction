@@ -764,7 +764,7 @@ class CDHSABatchRunner:
         max_s = sorted_stats[0] if sorted_stats else {}
         logger.info("  " + "-" * 82)
         logger.info(
-            "  Peak maximo global: %,.1f MB (%s)",
+            "  Peak maximo global: %.1f MB (%s)",
             max_s.get("peak_rss_mb", 0),
             max_s.get("label", ""),
         )
@@ -882,7 +882,7 @@ class CDHSABatchRunner:
 
             if peak_mb > 0:
                 logger.info(
-                    "  [MEM] Peak child RSS: %,.1f MB (%d samples)",
+                    "  [MEM] Peak child RSS: %.1f MB (%d samples)",
                     peak_mb, len(_child_samples),
                 )
 
