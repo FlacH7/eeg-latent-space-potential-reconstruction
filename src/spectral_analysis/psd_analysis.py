@@ -11,6 +11,10 @@ Módulo no invasivo que se integra en los pipelines existentes
 3. :func:`compute_channel_influence_on_latent` — influencia de los
    canales originales sobre cada dimensión latente (topoplots si hay
    montaje, barras si no), con métrica espectral opcional por bandas.
+   Si además hay matriz estructural de conectividad disponible
+   (``DB_LUDOVICO_01_STRUCTURAL_MATRIX_PATH`` en ``src.utils.config``),
+   genera la figura cualitativa adicional ``channel_influence_graph.png``
+   (influencia coloreada sobre el grafo estructural).
 4. :func:`load_psd_data` — carga de los ``.npz`` generados.
 
 Método espectral: multitaper de MNE (tapers DPSS/Slepian) con pesos
@@ -48,6 +52,18 @@ from .plotting_utils import (
     plot_topomap_grid,
 )
 
+# Plotter del grafo estructural (src.plotters). Import defensivo: si el
+# paquete de plotters no está disponible, el análisis PSD sigue
+# funcionando y simplemente no se genera la figura del grafo.
+try:
+    from src.plotters.structural_graph_plots import (
+        load_structural_matrix,
+        plot_structural_graph_influence,
+    )
+    _GRAPH_PLOTTER_AVAILABLE = True
+except Exception:  # entorno sin src.plotters accesible
+    _GRAPH_PLOTTER_AVAILABLE = False
+
 __all__ = [
     "compute_and_plot_raw_psd",
     "compute_and_plot_latent_psd",
@@ -69,6 +85,9 @@ MAX_CHANNELS_PER_FIG = 64
 # de 150 000 muestras para 300 s a 500 Hz con bandwidth=2.5).
 MAX_TAPERS_SINGLE_SHOT = 16
 _EPS = np.finfo(float).tiny
+# Nombre de la figura adicional: influencia de canales sobre el grafo
+# estructural (datos no-EEG con matriz de conectividad, p. ej. Ludovico_01).
+GRAPH_INFLUENCE_FILENAME = "channel_influence_graph.png"
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +260,100 @@ def _get_sfreq(raw: mne.io.Raw, meta: dict | None) -> float:
         if isinstance(pre, dict) and pre.get("sfreq"):
             return float(pre["sfreq"])
     return float(raw.info["sfreq"])
+
+
+def _resolve_structural_matrix_path() -> Path | None:
+    """Path de la matriz estructural desde la config del proyecto.
+
+    Import perezoso de ``DB_LUDOVICO_01_STRUCTURAL_MATRIX_PATH`` para no
+    acoplar este módulo a la config en tiempo de import (los pipelines
+    EEG no la necesitan). Devuelve ``None`` si la constante no existe o
+    está vacía.
+    """
+    try:
+        from src.utils.config import DB_LUDOVICO_01_STRUCTURAL_MATRIX_PATH
+    except (ImportError, AttributeError):
+        return None
+    if not DB_LUDOVICO_01_STRUCTURAL_MATRIX_PATH:
+        return None
+    return Path(DB_LUDOVICO_01_STRUCTURAL_MATRIX_PATH)
+
+
+def _maybe_plot_structural_graph(
+    weights: np.ndarray,
+    ch_names: list[str],
+    dim_labels: list[str],
+    out_dir: Path,
+    *,
+    force_recompute: bool = False,
+    structural_matrix_path: str | Path | None = None,
+) -> Path | None:
+    """Genera ``channel_influence_graph.png`` si hay matriz estructural.
+
+    Figura **adicional** (cualitativa) a las barras/topoplots: la
+    influencia de cada canal se dibuja como el color de un nodo del
+    grafo estructural (azul = positivo, rojo = negativo, intensidad
+    proporcional a ``|peso|``), un panel por dimensión latente. Cada
+    nodo lleva dentro su índice (0-based), que coincide con el índice
+    del canal en ``ch_names`` / ``raw.ch_names``.
+
+    Se omite silenciosamente (devuelve ``None``) cuando: el plotter de
+    ``src.plotters`` no está disponible, no hay path de matriz en la
+    config, el fichero no existe, o la matriz no es cuadrada del mismo
+    n.º de canales que ``weights`` (p. ej. pipelines EEG con otro n.º
+    de canales, donde la matriz de Ludovico_01 no aplica). Una figura
+    ya existente no se regenera salvo ``force_recompute=True``.
+
+    Returns
+    -------
+    Path | None
+        Ruta de la figura generada (o ya existente), o ``None`` si se
+        omitió.
+    """
+    if not _GRAPH_PLOTTER_AVAILABLE:
+        return None
+    out_dir = Path(out_dir)
+    fig_path = out_dir / GRAPH_INFLUENCE_FILENAME
+    if fig_path.exists() and not force_recompute:
+        return fig_path
+
+    path = (
+        Path(structural_matrix_path)
+        if structural_matrix_path is not None
+        else _resolve_structural_matrix_path()
+    )
+    if path is None or not path.exists():
+        return None
+
+    weights = np.asarray(weights, dtype=float)
+    try:
+        adjacency = load_structural_matrix(path)
+    except (OSError, ValueError) as exc:
+        logger.warning("No se pudo cargar la matriz estructural %s: %s", path, exc)
+        return None
+    if adjacency.shape[0] != weights.shape[0]:
+        logger.info(
+            "Matriz estructural (%d nodos) no coincide con los canales de "
+            "influencia (%d); se omite el plot de grafo.",
+            adjacency.shape[0], weights.shape[0],
+        )
+        return None
+
+    fig = plot_structural_graph_influence(
+        weights,
+        adjacency,
+        dim_labels=list(dim_labels),
+        # Etiqueta dentro del nodo = índice del nodo (0-based): el nodo i
+        # es la fila/columna i de la matriz estructural y el canal i de
+        # los datos (raw.ch_names[i]). Para mostrar nombres de canal en
+        # su lugar, pasar node_labels=list(ch_names).
+        node_labels=None,
+        show_node_labels=True,
+    )
+    fig.savefig(fig_path, dpi=150)
+    plt.close(fig)
+    logger.info("Plot de influencia sobre grafo estructural guardado: %s", fig_path)
+    return fig_path
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +600,14 @@ def compute_channel_influence_on_latent(
     Visualización: topoplots si ``raw`` tiene montaje topográfico;
     barras horizontales en caso contrario (p. ej. datos CSV/Ludovico).
 
+    Figura adicional (cualitativa): si existe matriz estructural de
+    conectividad (constante ``DB_LUDOVICO_01_STRUCTURAL_MATRIX_PATH``
+    en ``src.utils.config``) y su tamaño coincide con el n.º de canales,
+    se genera también ``channel_influence_graph.png`` — los nodos del
+    grafo estructural coloreados por la influencia (ver
+    :mod:`src.plotters.structural_graph_plots`). Esta figura se genera
+    aunque el resto de resultados se carguen desde caché.
+
     Si se proporciona ``raw_psd_path`` (el ``.npz`` de
     :func:`compute_and_plot_raw_psd`), se añade al ``.npz`` de salida la
     métrica espectral por bandas (``spectral_contribution`` y
@@ -511,6 +632,16 @@ def compute_channel_influence_on_latent(
     if data_path.exists() and fig_path.exists() and not force_recompute:
         cached = load_psd_data(data_path)
         logger.info("Influencia de canales cargada desde caché: %s", data_path)
+        # Figura adicional sobre el grafo estructural: se intenta generar
+        # aunque el resto venga de caché (p. ej. pipelines corridos antes
+        # de añadir este plot). No-op si la figura ya existe o no hay
+        # matriz estructural aplicable.
+        _maybe_plot_structural_graph(
+            cached["influence_weights"],
+            list(cached["ch_names"]),
+            list(cached.get("latent_dim_labels", dim_labels)),
+            out_dir,
+        )
         return cached["influence_weights"], list(cached["ch_names"]), fig_path, data_path
 
     # 1. Pesos de transformación (lineal) o fallback por correlación.
@@ -579,6 +710,13 @@ def compute_channel_influence_on_latent(
     fig = _make_influence_figure(raw, ch_names, weights, dim_labels)
     fig.savefig(fig_path, dpi=150)
     plt.close(fig)
+
+    # 3b. Figura adicional (cualitativa): influencia sobre el grafo
+    # estructural, si hay matriz de conectividad disponible y coincide
+    # con el n.º de canales. No sustituye a las barras/topoplots.
+    _maybe_plot_structural_graph(
+        weights, ch_names, dim_labels, out_dir, force_recompute=force_recompute,
+    )
 
     # 4. Persistencia.
     payload = {
