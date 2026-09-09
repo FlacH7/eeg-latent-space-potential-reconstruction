@@ -10,6 +10,10 @@ una cabeza (``mne`` topoplot) o barras horizontales:
   adyacencia binaria, p. ej. ``structural.csv`` de Ludovico_01).
 - Color del nodo = peso de influencia en ``[-1, 1]`` (azul = positivo,
   rojo = negativo, blanco ≈ 0; colormap ``RdBu``).
+- Orden de superposición por ``|peso|``: en las zonas donde los nodos
+  se solapan (núcleo denso), los de influencia más fuerte se dibujan
+  al final y quedan **encima** — un nodo relevante nunca queda
+  enterrado debajo de nodos casi-blancos.
 - Un panel por dimensión latente (LD1, LD2, ...), cada uno con su
   colorbar, en la misma disposición que ``plot_topomap_grid``.
 
@@ -178,6 +182,7 @@ def plot_structural_graph_influence(
     node_labels: list[str] | None = None,
     show_node_labels: bool = True,
     node_label_fontsize: float = 7.0,
+    sort_by_abs_weight: bool = True,
     layout: str = "spring",
     seed: int = 42,
     layout_k: float | None = None,
@@ -223,6 +228,12 @@ def plot_structural_graph_influence(
         Tamaño de fuente de las etiquetas internas. Con el
         ``node_size`` por defecto (300) caben 1–2 dígitos; si reduces
         ``node_size``, reduce este valor en consecuencia.
+    sort_by_abs_weight:
+        Si es ``True`` (default), el orden de dibujo de los nodos sigue
+        el valor absoluto del peso: los de influencia más fuerte se
+        dibujan al final y quedan **encima** donde hay solapamiento
+        (núcleo denso), en vez de quedar enterrados bajo nodos casi
+        blancos. Con ``False`` se dibujan en orden de índice de nodo.
     layout, seed, layout_k:
         Ver :func:`compute_graph_layout`.
     cmap, vlim:
@@ -286,16 +297,29 @@ def plot_structural_graph_influence(
                 [pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
                 color=edge_color, lw=edge_width, alpha=edge_alpha, zorder=1,
             )
+        # Orden de superposición: por |peso| de influencia. Los nodos
+        # casi blancos (|peso| ≈ 0) se dibujan primero y los de color
+        # más fuerte al final → donde hay solapamiento (núcleo denso)
+        # los nodos relevantes quedan ENCIMA y no quedan enterrados.
+        draw_order = (
+            np.argsort(np.abs(weights[:, d]), kind="stable")
+            if sort_by_abs_weight
+            else np.arange(n_channels)
+        )
+        pos_d = pos[draw_order]
+        weights_d = weights[draw_order, d]
         scatter = ax.scatter(
-            pos[:, 0], pos[:, 1],
-            c=weights[:, d], cmap=cmap, vmin=vmin, vmax=vmax,
+            pos_d[:, 0], pos_d[:, 1],
+            c=weights_d, cmap=cmap, vmin=vmin, vmax=vmax,
             s=node_size, edgecolors="k", linewidths=0.8, zorder=3,
         )
         if show_node_labels:
-            # Etiqueta centrada dentro del nodo. Default: índice del nodo
-            # (0-based, orden de la matriz estructural / canales). El color
-            # del texto se elige por luminancia del marcador para que la
-            # etiqueta sea legible sobre nodos oscuros y claros.
+            # Etiqueta centrada dentro del nodo, dibujada en el mismo
+            # orden: la etiqueta del nodo fuerte también queda encima.
+            # Default: índice del nodo (0-based, orden de la matriz
+            # estructural / canales). El color del texto se elige por
+            # luminancia del marcador para que sea legible sobre nodos
+            # oscuros y claros.
             labels = (
                 [str(name) for name in node_labels]
                 if node_labels is not None
@@ -303,11 +327,11 @@ def plot_structural_graph_influence(
             )
             norm = plt.Normalize(vmin=vmin, vmax=vmax)
             cmap_obj = plt.get_cmap(cmap)
-            for idx, name in enumerate(labels):
+            for idx in draw_order:
                 rgba = cmap_obj(norm(weights[idx, d]))
                 luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
                 ax.text(
-                    pos[idx, 0], pos[idx, 1], name,
+                    pos[idx, 0], pos[idx, 1], labels[idx],
                     ha="center", va="center",
                     fontsize=node_label_fontsize,
                     color="white" if luminance < 0.5 else "black",
