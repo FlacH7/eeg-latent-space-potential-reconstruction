@@ -21,6 +21,9 @@ DB_SIENA_PATH = os.getenv("DB_SIENA_PATH")
 
 # Ludovico 01 Database
 DB_LUDOVICO_01_PATH = os.getenv("DB_LUDOVICO_01_PATH")
+DB_LUDOVICO_01_STRUCTURAL_MATRIX_PATH = str(
+    Path(DB_LUDOVICO_01_PATH) / "structural.csv"   # ajusta a la ruta real
+)
 
 # Cache and results
 DATA_SIMULATIONS_CACHE_PATH = os.getenv("DATA_SIMULATIONS_CACHE_PATH")
