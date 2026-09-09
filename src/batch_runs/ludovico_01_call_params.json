@@ -21,13 +21,10 @@
 
   "methods": [
     {
-      "label": "hankel+cdhsa+top_n",
+      "label": "hankel+pca+top_n",
       "stage1_embedding": "hankel",
-      "stage1_params": {"depth": 10},
-      "stage2_dynamics": "cdhsa_specific_modes",
-      "stage2_params": {
-        "mode_map_path": "params/mode_map_4_modes_ludovico_01_all_conditions_full.json"
-      },
+      "stage2_dynamics": "pca",
+      "stage2_params": {"n_components":20},
       "stage3_selection": "top_n",
       "stage3_params": {}
     }
