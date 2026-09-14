@@ -349,6 +349,7 @@ def _maybe_plot_structural_graph(
         # su lugar, pasar node_labels=list(ch_names).
         node_labels=None,
         show_node_labels=True,
+        layout="circular"
     )
     fig.savefig(fig_path, dpi=150)
     plt.close(fig)
