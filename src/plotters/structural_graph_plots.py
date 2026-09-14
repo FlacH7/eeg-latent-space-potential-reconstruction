@@ -109,17 +109,22 @@ def compute_graph_layout(
 
     Con ``networkx`` instalado soporta ``"spring"`` (Fruchterman-
     Reingold, determinista vía ``seed``), ``"kamada_kawai"``,
-    ``"spectral"`` y ``"circular"``. Sin ``networkx``, cualquier valor
-    de ``layout`` cae en un layout espectral puro-numpy (autovectores
-    asociados al 2.º y 3.º autovalor del Laplaciano), también
-    determinista.
+    ``"spectral"`` y ``"circular"``. Sin ``networkx``, ``"circular"``
+    se calcula igualmente con numpy puro (nodos equiespaciados sobre la
+    circunferencia unidad, en orden de índice — la misma convención de
+    ``nx.circular_layout``); cualquier otro valor de ``layout`` cae en
+    un layout espectral puro-numpy (autovectores asociados al 2.º y 3.º
+    autovalor del Laplaciano), también determinista.
 
     Parameters
     ----------
     adjacency:
         Matriz de adyacencia ``(n, n)``.
     layout:
-        Algoritmo de layout (ver arriba).
+        Algoritmo de layout (ver arriba). Con ``"circular"`` los nodos
+        se colocan sobre una circunferencia y se dibujan **todas** las
+        aristas de la matriz (no se poda ninguna), lo que es útil para
+        grafos densos donde los layouts de fuerzas solapan nodos.
     seed:
         Semilla para layouts estocásticos (``spring``).
     k:
@@ -156,6 +161,15 @@ def compute_graph_layout(
                 "Opciones: 'spring', 'kamada_kawai', 'spectral', 'circular'."
             )
         return np.array([pos[i] for i in range(n)], dtype=float)
+
+    if layout == "circular":
+        # Fallback numpy para "circular": nodos equiespaciados sobre la
+        # circunferencia unidad, en orden de índice (0, 1, ..., n-1),
+        # empezando en el eje +x y en sentido antihorario — la misma
+        # convención que nx.circular_layout. Determinista y sin
+        # dependencias.
+        angles = 2.0 * np.pi * np.arange(n) / max(n, 1)
+        return np.column_stack([np.cos(angles), np.sin(angles)])
 
     logger.info(
         "networkx no está instalado; se usa layout espectral (numpy) "
