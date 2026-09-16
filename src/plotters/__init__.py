@@ -96,6 +96,11 @@ from src.plotters.pipeline_overview import (
     plot_pipeline_flowchart,
 )
 
+from src.plotters.structural_graph_plots import (
+    load_structural_matrix,
+    plot_structural_graph_influence,
+)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -141,6 +146,9 @@ __all__ = [
     # Pipeline overview
     "plot_pipeline_energy_budget",
     "plot_pipeline_flowchart",
+    # Structural graph
+    "load_structural_matrix",
+    "plot_structural_graph_influence",
     # Helpers
     "compute_transition_matrix",
     "plot_latent_trajectory"

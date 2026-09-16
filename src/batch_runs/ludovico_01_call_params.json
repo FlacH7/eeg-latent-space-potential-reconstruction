@@ -21,7 +21,7 @@
 
   "methods": [
     {
-      "label": "hankel+cdhsa+top_n",
+      "label": "hankel+pca+top_n",
       "stage1_embedding": "hankel",
       "stage1_params": {"depth": 10},
       "stage2_dynamics": "cdhsa_specific_modes",
